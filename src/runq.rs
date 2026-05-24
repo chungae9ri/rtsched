@@ -7,10 +7,11 @@ use core::ptr;
 
 use cortex_m::interrupt;
 
+use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::CURRENT_THREAD_CTX;
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
-use crate::waitq::{WaitQueueError, insert_wait_thread, remove_wait_thread, waitq_thread_by_id};
+use crate::waitq::{WaitQueueError, insert_wait_thread, remove_wait_thread};
 
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
 
@@ -128,38 +129,6 @@ unsafe impl RBTreeNode for SchedEntity {
     }
 }
 
-pub(crate) unsafe fn runq_thread_by_id(id: u32) -> *mut ThreadCtx {
-    unsafe {
-        let tree = &*CFS_RUN_QUEUE.get();
-        let mut entity = tree.first();
-
-        while !entity.is_null() {
-            let thread = thread_from_cfs_sched_entity(entity);
-            if (*thread).id == id {
-                return thread;
-            }
-            entity = tree.next(entity);
-        }
-
-        ptr::null_mut()
-    }
-}
-
-pub(crate) unsafe fn sched_thread_by_id(id: u32) -> *mut ThreadCtx {
-    unsafe {
-        let thread = runq_thread_by_id(id);
-        if !thread.is_null() {
-            return thread;
-        }
-
-        if !CURRENT_THREAD_CTX.is_null() && (*CURRENT_THREAD_CTX).id == id {
-            return CURRENT_THREAD_CTX;
-        }
-
-        ptr::null_mut()
-    }
-}
-
 pub(crate) fn thread_is_cfs(thread: *const ThreadCtx) -> bool {
     if thread.is_null() {
         return false;
@@ -225,6 +194,23 @@ pub(crate) unsafe fn init_cfs_rq() {
     }
 }
 
+/// Align a detached entity's vruntime and sched_tick_cnt with the left-most queued entity.
+///
+/// If the run queue is empty, the entity keeps its current vruntime.
+pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
+    if entity.is_null() {
+        return;
+    }
+
+    unsafe {
+        let leftmost = (*CFS_RUN_QUEUE.get()).first();
+        if !leftmost.is_null() {
+            (*entity).vruntime = (*leftmost).vruntime;
+            (*entity).sched_tick_cnt = (*leftmost).sched_tick_cnt;
+        }
+    }
+}
+
 /// Enqueue a thread into the scheduler run queue.
 ///
 /// The thread's scheduler entity vruntime field is used as the red-black tree key.
@@ -233,6 +219,7 @@ pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
         (*thread).state = ThreadState::Ready;
         let entity = cfs_sched_entity(thread);
         (*entity).reset_links();
+        update_from_leftmost(entity);
         (*CFS_RUN_QUEUE.get()).insert(entity);
         *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
     }
@@ -250,41 +237,38 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     }
 }
 
-pub fn dequeue_runq_to_waitq(id: u32) -> Result<(), WaitQueueError> {
+pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     interrupt::free(|_| unsafe {
-        let thread = sched_thread_by_id(id);
         if thread.is_null() {
             return Err(WaitQueueError::NotFound);
         }
 
-        if (*thread).is_cfs && (*thread).state == ThreadState::Ready {
-            let entity = cfs_sched_entity(thread);
-            (*CFS_RUN_QUEUE.get()).remove(entity);
-            *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
-        }
+        let entity = cfs_sched_entity(thread);
+        (*CFS_RUN_QUEUE.get()).remove(entity);
         (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
+        program_wait_ktimer();
 
         Ok(())
     })
 }
 
-pub fn enqueue_runq_from_waitq(id: u32) -> Result<(), WaitQueueError> {
+pub fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     interrupt::free(|_| unsafe {
-        let thread = waitq_thread_by_id(id);
         if thread.is_null() {
             return Err(WaitQueueError::NotFound);
         }
 
         remove_wait_thread(thread);
+        program_wait_ktimer();
 
         (*thread).state = ThreadState::Ready;
         if (*thread).is_cfs {
             let entity = cfs_sched_entity(thread);
             (*entity).reset_links();
+            update_from_leftmost(entity);
             (*CFS_RUN_QUEUE.get()).insert(entity);
-            *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
         }
 
         Ok(())

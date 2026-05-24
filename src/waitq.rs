@@ -99,23 +99,6 @@ unsafe impl RBTreeNode for WaitEntity {
     }
 }
 
-pub(crate) unsafe fn waitq_thread_by_id(id: u32) -> *mut ThreadCtx {
-    unsafe {
-        let tree = &*WAIT_QUEUE.get();
-        let mut entity = tree.first();
-
-        while !entity.is_null() {
-            let thread = thread_from_wait_entity(entity);
-            if (*thread).id == id {
-                return thread;
-            }
-            entity = tree.next(entity);
-        }
-
-        ptr::null_mut()
-    }
-}
-
 pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
     unsafe {
         if (*thread).is_cfs {
@@ -123,6 +106,30 @@ pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
         } else {
             rt_wait_entity(thread)
         }
+    }
+}
+
+pub(crate) unsafe fn advance_wait_queue(elapsed: u32) {
+    unsafe {
+        let tree = &*WAIT_QUEUE.get();
+        let mut entity = tree.first();
+
+        while !entity.is_null() {
+            let next = tree.next(entity);
+            (*entity).wait_ticks = (*entity).wait_ticks.saturating_sub(elapsed);
+            entity = next;
+        }
+    }
+}
+
+pub(crate) unsafe fn pop_first_wait_thread() -> *mut ThreadCtx {
+    unsafe {
+        let tree = &mut *WAIT_QUEUE.get();
+        let Some(entity) = tree.pop_first() else {
+            return ptr::null_mut();
+        };
+
+        thread_from_wait_entity(entity as *mut WaitEntity)
     }
 }
 

@@ -14,9 +14,14 @@ use cortex_m::{interrupt, peripheral::SYST};
 use rtt_target::rprintln;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
+use crate::runq::{CFS_RUN_QUEUE, update_from_leftmost};
 use crate::sched::CFS_KTIMER;
-use crate::thread::{ThreadCtx, ThreadState, rt_ktimer_entity, set_rt_ktimer_entity};
-use crate::waitq::{WaitQueueError, insert_wait_thread, remove_wait_thread, waitq_thread_by_id};
+use crate::thread::{
+    ThreadCtx, ThreadState, cfs_sched_entity, rt_ktimer_entity, set_rt_ktimer_entity,
+};
+use crate::waitq::{
+    WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_first_wait_thread, remove_wait_thread,
+};
 
 pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
 pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
@@ -175,6 +180,10 @@ impl WaitKTimer {
     pub fn entity_mut(&mut self) -> *mut KTimerEntity {
         ptr::addr_of_mut!(self.entity)
     }
+
+    pub fn reset_links(&mut self) {
+        self.entity.reset_links();
+    }
 }
 
 #[repr(C)]
@@ -229,6 +238,7 @@ pub unsafe fn init_ktimer_queue() {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
         ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
         ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::inactive());
+        (*KTIMER_QUEUE.get()).insert((*ptr::addr_of_mut!(WAIT_KTIMER)).entity_mut());
     });
 }
 
@@ -236,7 +246,52 @@ pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
     interrupt::free(|_| unsafe {
         (*entity).reset_links();
         (*KTIMER_QUEUE.get()).insert(entity);
+        refresh_next_ktimer();
     });
+}
+
+pub(crate) unsafe fn program_wait_ktimer() {
+    interrupt::free(|_| unsafe {
+        let wait_entity = (*WAIT_QUEUE.get()).first();
+
+        let wait_ktimer = ptr::addr_of_mut!(WAIT_KTIMER);
+        let wait_ktimer_entity = (*wait_ktimer).entity_mut();
+
+        (*KTIMER_QUEUE.get()).remove(wait_ktimer_entity);
+        if wait_entity.is_null() {
+            (*wait_ktimer_entity).set_deadline(CM_SYSTICK_RELOAD_MAX);
+        } else {
+            (*wait_ktimer_entity).set_deadline((*wait_entity).wait_ticks);
+        }
+
+        (*wait_ktimer_entity).set_active(false); // WAIT_KTIMER is always inactive
+        (*KTIMER_QUEUE.get()).insert(wait_ktimer_entity);
+        refresh_next_ktimer();
+    });
+}
+
+pub(crate) unsafe fn wake_wait_thread(elapsed: u32) {
+    unsafe {
+        let wait_thread = pop_first_wait_thread();
+        if !wait_thread.is_null() {
+            (*wait_thread).state = ThreadState::Ready;
+            if (*wait_thread).is_cfs {
+                let entity: *mut crate::runq::SchedEntity = cfs_sched_entity(wait_thread);
+                (*entity).reset_links();
+                update_from_leftmost(entity);
+                (*CFS_RUN_QUEUE.get()).insert(entity);
+            } else {
+                let ktimer_entity = rt_ktimer_entity(wait_thread);
+                if !ktimer_entity.is_null() {
+                    (*ktimer_entity)
+                        .set_deadline((*ktimer_entity).deadline().saturating_sub(elapsed));
+                    (*ktimer_entity).set_active(true);
+                    enqueue_ktimer(ktimer_entity);
+                }
+            }
+        }
+        program_wait_ktimer();
+    }
 }
 
 unsafe fn remove_ktimer(entity: *mut KTimerEntity) -> *mut KTimerEntity {
@@ -248,10 +303,7 @@ unsafe fn remove_ktimer(entity: *mut KTimerEntity) -> *mut KTimerEntity {
         let removed = (*KTIMER_QUEUE.get()).remove(entity);
         (*removed).set_active(false);
         if NEXT_KTIMER == removed {
-            NEXT_KTIMER = (*KTIMER_QUEUE.get()).first_active();
-            if NEXT_KTIMER.is_null() {
-                NEXT_KTIMER = activate_cfs_ktimer();
-            }
+            refresh_next_ktimer();
         }
         removed
     })
@@ -267,35 +319,21 @@ unsafe fn reinsert_ktimer(entity: *mut KTimerEntity) {
         (*entity).reset_links();
         (*KTIMER_QUEUE.get()).insert(entity);
 
-        let next = (*KTIMER_QUEUE.get()).first_active();
-        if !next.is_null() {
-            NEXT_KTIMER = next;
-        }
+        refresh_next_ktimer();
     });
 }
 
-unsafe fn ktimer_thread_by_id(id: u32) -> *mut ThreadCtx {
-    interrupt::free(|_| unsafe {
-        let queue = &*KTIMER_QUEUE.get();
-        let mut entity = queue.first();
-
-        while !entity.is_null() {
-            if !is_cfs_ktimer(entity) {
-                let thread = (*KTimerEntity::rt_ktimer(entity)).thread_ctx();
-                if !thread.is_null() && (*thread).id == id {
-                    return thread;
-                }
-            }
-            entity = queue.next(entity);
+unsafe fn refresh_next_ktimer() {
+    unsafe {
+        NEXT_KTIMER = (*KTIMER_QUEUE.get()).first_active();
+        if NEXT_KTIMER.is_null() {
+            NEXT_KTIMER = activate_cfs_ktimer();
         }
-
-        ptr::null_mut()
-    })
+    }
 }
 
-pub fn dequeue_ktimerq_to_waitq(id: u32) -> Result<(), WaitQueueError> {
+pub fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     interrupt::free(|_| unsafe {
-        let thread = ktimer_thread_by_id(id);
         if thread.is_null() || (*thread).is_cfs {
             return Err(WaitQueueError::NotFound);
         }
@@ -309,14 +347,14 @@ pub fn dequeue_ktimerq_to_waitq(id: u32) -> Result<(), WaitQueueError> {
         (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
+        program_wait_ktimer();
 
         Ok(())
     })
 }
 
-pub fn enqueue_ktimerq_from_waitq(id: u32) -> Result<(), WaitQueueError> {
+pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     interrupt::free(|_| unsafe {
-        let thread = waitq_thread_by_id(id);
         if thread.is_null() || (*thread).is_cfs {
             return Err(WaitQueueError::NotFound);
         }
@@ -330,6 +368,7 @@ pub fn enqueue_ktimerq_from_waitq(id: u32) -> Result<(), WaitQueueError> {
 
         (*thread).state = ThreadState::Ready;
         reinsert_ktimer(ktimer_entity);
+        program_wait_ktimer();
 
         Ok(())
     })
@@ -357,8 +396,8 @@ pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
     });
 }
 
-pub(crate) unsafe fn dispatch_expired_ktimer() -> *mut KTimerEntity {
-    interrupt::free(|_| unsafe { (*KTIMER_QUEUE.get()).dispatch_expired() })
+pub(crate) unsafe fn dispatch_expired_ktimer(elapsed: u32) -> *mut KTimerEntity {
+    interrupt::free(|_| unsafe { (*KTIMER_QUEUE.get()).dispatch_expired(elapsed) })
 }
 
 pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
@@ -374,7 +413,11 @@ pub fn traverse_ktimer_queue() {
 
         rprintln!("ktimer queue:");
         while !entity.is_null() {
-            rprintln!("{} ktimer's deadline={}", ktimer_name(entity), (*entity).deadline());
+            rprintln!(
+                "{} ktimer's deadline={}",
+                ktimer_name(entity),
+                (*entity).deadline()
+            );
             entity = queue.next(entity);
         }
     });
@@ -406,14 +449,25 @@ pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
     !entity.is_null() && entity == cfs_ktimer().cast_const()
 }
 
+pub(crate) fn is_wait_ktimer(entity: *const KTimerEntity) -> bool {
+    !entity.is_null() && entity == wait_ktimer().cast_const()
+}
+
 fn cfs_ktimer() -> *mut KTimerEntity {
     unsafe { ptr::addr_of_mut!(CFS_KTIMER.entity) }
 }
+
+fn wait_ktimer() -> *mut KTimerEntity {
+    unsafe { ptr::addr_of_mut!(WAIT_KTIMER.entity) }
+}
+
 #[allow(dead_code)]
 unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
     unsafe {
         if is_cfs_ktimer(entity) {
             (*ptr::addr_of_mut!(CFS_KTIMER)).name
+        } else if is_wait_ktimer(entity) {
+            (*ptr::addr_of_mut!(WAIT_KTIMER)).name
         } else {
             (*KTimerEntity::rt_ktimer(entity.cast_mut())).name
         }
@@ -430,13 +484,14 @@ unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
     cfs
 }
 
-pub(crate) unsafe fn yield_ktimer(elapsed: u32) -> *mut KTimerEntity {
+pub(crate) unsafe fn yield_ktimer(entity: *mut KTimerEntity, elapsed: u32) -> *mut KTimerEntity {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let Some(entity) = queue.pop_first() else {
+        if entity.is_null() {
             return ptr::null_mut();
-        };
-        let entity = entity as *mut KTimerEntity;
+        }
+
+        queue.remove(entity);
 
         (*entity).set_deadline((*entity).duration().saturating_sub(elapsed));
         (*entity).set_active(false);
@@ -457,18 +512,21 @@ pub(crate) unsafe fn yield_ktimer(elapsed: u32) -> *mut KTimerEntity {
 pub(crate) fn program_next_systick() -> Option<u32> {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let entity = queue.first();
-        if entity.is_null() {
+        let Some(entity) = queue.pop_first() else {
             return None;
-        }
+        };
+        let entity = entity as *mut KTimerEntity;
 
         let reload = if is_cfs_ktimer(entity) {
             (*KTimerEntity::cfs_ktimer(entity)).execution_ticks()
+        } else if is_wait_ktimer(entity) {
+            (*entity).deadline()
         } else {
-            (*entity).duration()
+            (*entity).deadline()
         };
 
         (*entity).set_deadline(reload);
+        queue.insert(entity);
 
         (*SYST::PTR).rvr.write(reload);
         (*SYST::PTR).cvr.write(0);
@@ -570,26 +628,44 @@ impl KTimerQueue {
 
     pub unsafe fn advance(&mut self, elapsed: u32) {
         unsafe {
-            let mut entity = self.first();
-            while !entity.is_null() {
-                let next = self.next(entity);
-                (*entity).deadline = (*entity).deadline.saturating_sub(elapsed);
-                entity = next;
+            let mut advanced = RBTree::new();
+
+            while let Some(entity) = self.pop_first() {
+                let entity = entity as *mut KTimerEntity;
+                if !(is_wait_ktimer(entity) && (*entity).deadline == CM_SYSTICK_RELOAD_MAX) {
+                    (*entity).deadline = (*entity).deadline.saturating_sub(elapsed);
+                }
+                advanced.insert(entity);
             }
+
+            self.tree = advanced;
         }
     }
 
-    pub unsafe fn dispatch_expired(&mut self) -> *mut KTimerEntity {
+    pub unsafe fn dispatch_expired(&mut self, elapsed: u32) -> *mut KTimerEntity {
         unsafe {
             let Some(expired) = self.pop_first() else {
                 return ptr::null_mut();
             };
 
             let expired = expired as *mut KTimerEntity;
-            (*expired).deadline = (*expired).duration();
-            (*expired).set_active(true);
-            self.insert(expired);
-            self.first()
+            if is_wait_ktimer(expired) {
+                //(*expired).deadline = CM_SYSTICK_RELOAD_MAX;
+                //(*expired).set_active(false);
+                //self.insert(expired);
+                wake_wait_thread(elapsed);
+            } else {
+                (*expired).deadline = (*expired).duration();
+                (*expired).set_active(true);
+                self.insert(expired);
+            }
+
+            let next = self.first_active();
+            if next.is_null() {
+                activate_cfs_ktimer()
+            } else {
+                next
+            }
         }
     }
 

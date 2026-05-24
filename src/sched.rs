@@ -9,12 +9,12 @@ use cortex_m::peripheral::SCB;
 
 use crate::ktimer::{
     CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
-    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
+    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, is_wait_ktimer, next_ktimer,
     program_next_systick, update_next_ktimer,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
 use crate::thread::{
-    ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi,
+    ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi_with_elapsed,
 };
 
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
@@ -49,6 +49,7 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
         init_cfs_rq();
         CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks, "cfs");
         let cfs_ktimer = (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut();
+        (*cfs_ktimer).set_deadline(exec_ticks);
         enqueue_ktimer(cfs_ktimer);
     }
 }
@@ -154,26 +155,30 @@ extern "C" fn schedule() {
         //   CFS thread, insert current to CFS runq and switch to next RT thread.
         // - If the next expired ktimer is for an RT thread and current thread is
         //   RT thread,preempt the CURRENT_THREAD_CTX with next RT thread.
-        if !CURRENT_THREAD_CTX.is_null() && (*CURRENT_THREAD_CTX).state == ThreadState::Running {
-            if CURRENT_THREAD_IS_CFS {
-                let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
-                (*current_entity).sched_tick_cnt += u64::from(elapsed_ticks_since_last_interrupt());
-                let priority_sum = *CFS_RUN_QUEUE.priority_sum();
-                if priority_sum == 0 {
-                    return;
-                }
-                let sched_tick_cnt = (*current_entity).sched_tick_cnt;
-                let priority = u64::from((*current_entity).priority);
-                let priority_sum = u64::from(priority_sum);
-
-                (*current_entity).vruntime = sched_tick_cnt * priority / priority_sum;
+        if CURRENT_THREAD_IS_CFS && (*CURRENT_THREAD_CTX).state == ThreadState::Running {
+            let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
+            (*current_entity).sched_tick_cnt += u64::from(elapsed_ticks_since_last_interrupt());
+            let priority_sum = *CFS_RUN_QUEUE.priority_sum();
+            if priority_sum == 0 {
+                return;
             }
+            let sched_tick_cnt = (*current_entity).sched_tick_cnt;
+            let priority = u64::from((*current_entity).priority);
+            let priority_sum = u64::from(priority_sum);
 
-            if is_cfs_ktimer(next_ktimer) {
-                if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
-                    let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
+            (*current_entity).vruntime = sched_tick_cnt * priority / priority_sum;
+        }
 
-                    if CURRENT_THREAD_IS_CFS {
+        if is_cfs_ktimer(next_ktimer) {
+            if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
+                let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
+
+                if CURRENT_THREAD_IS_CFS {
+                    if (*CURRENT_THREAD_CTX).state == ThreadState::Waiting {
+                        (*next_thread).state = ThreadState::Running;
+                        CURRENT_THREAD_CTX = next_thread;
+                        CURRENT_THREAD_IS_CFS = true;
+                    } else {
                         let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
                         debug_assert!(
                             CURRENT_THREAD_CTX != next_thread,
@@ -188,32 +193,43 @@ extern "C" fn schedule() {
                         } else {
                             (*CFS_RUN_QUEUE.get()).insert(next_entity as *mut SchedEntity);
                         }
-                    } else {
-                        (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
-                        (*next_thread).state = ThreadState::Running;
-                        CURRENT_THREAD_CTX = next_thread;
-                        CURRENT_THREAD_IS_CFS = true;
                     }
-                }
-            } else {
-                let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
-                if next_thread.is_null() {
-                    return;
-                }
-
-                if CURRENT_THREAD_IS_CFS {
-                    (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
-                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
-                    (*next_thread).state = ThreadState::Running;
-                    CURRENT_THREAD_CTX = next_thread;
-                    CURRENT_THREAD_IS_CFS = false;
                 } else {
-                    (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                    if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
+                        (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                    }
                     (*next_thread).state = ThreadState::Running;
                     CURRENT_THREAD_CTX = next_thread;
-                    CURRENT_THREAD_IS_CFS = false;
+                    CURRENT_THREAD_IS_CFS = true;
                 }
             }
+        } else if is_wait_ktimer(next_ktimer) {
+            // TODO: If next_ktimer is a wait ktimer, pick next active ktimer (rt or cfs).
+            //       If there is no active ktimer (rt or cfs) to run, run cpu_idle thread.
+            //       For now, we just run CFS KTimer thread.
+            if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
+                let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
+
+                (*next_thread).state = ThreadState::Running;
+                CURRENT_THREAD_CTX = next_thread;
+                CURRENT_THREAD_IS_CFS = true;
+            }
+        } else {
+            let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
+
+            if next_thread.is_null() {
+                return;
+            }
+
+            if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
+                (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                if CURRENT_THREAD_IS_CFS {
+                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
+                }
+            }
+            (*next_thread).state = ThreadState::Running;
+            CURRENT_THREAD_CTX = next_thread;
+            CURRENT_THREAD_IS_CFS = false;
         }
 
         program_next_systick();
@@ -224,25 +240,28 @@ extern "C" fn schedule() {
 pub fn handle_systick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
+    let next_ktimer = unsafe {
+        advance_ktimers(elapsed);
+        dispatch_expired_ktimer(elapsed)
+    };
+
     unsafe {
         if CURRENT_THREAD_IS_CFS {
             let cfs_timer = ptr::addr_of_mut!(CFS_KTIMER);
-            (*cfs_timer).add_runtime(elapsed - 1);
+            (*cfs_timer).add_runtime(elapsed);
             if (*cfs_timer).runtime() >= (*cfs_timer).execution_ticks() {
                 (*cfs_timer).reset_runtime();
-                yieldyi();
+                // elapsed time is already counted in advance_ktimers.
+                yieldyi_with_elapsed(0);
                 return;
             }
         }
     }
 
-    let next_ktimer = unsafe {
-        advance_ktimers(elapsed);
-        dispatch_expired_ktimer()
-    };
-
+    // This should be done before updating KTIMER_QUEUE
+    //let is_current_wait_ktimer = ktimer_queue_leftmost_is_wait_ktimer();
     unsafe {
-        if !next_ktimer.is_null() {
+        if !next_ktimer.is_null() && !is_wait_ktimer(next_ktimer) {
             (*next_ktimer).set_active(true);
         }
 

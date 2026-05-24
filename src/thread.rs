@@ -14,8 +14,8 @@ use crate::ktimer::{
     yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
-use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
-use crate::waitq::WaitEntity;
+use crate::sched::{CFS_KTIMER, CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
+use crate::waitq::{WaitEntity, advance_wait_queue};
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -299,13 +299,22 @@ unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
 /// This is intended for the threads that have completed their current
 /// job and want to give a chance to next scheduled thread.
 pub fn yieldyi() {
+    let elapsed: u32 = elapsed_ticks_since_current_reload();
+    yieldyi_with_elapsed(elapsed);
+}
+
+pub fn yieldyi_with_elapsed(elapsed: u32) {
     interrupt::free(|_| unsafe {
-        let elapsed = elapsed_ticks_since_current_reload();
-        if !CURRENT_THREAD_IS_CFS {
+        let current_ktimer = if CURRENT_THREAD_IS_CFS {
+            ptr::addr_of_mut!(CFS_KTIMER.entity)
+        } else {
             let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
             (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
-        }
-        let next_ktimer = yield_ktimer(elapsed);
+
+            rt_ktimer_entity(CURRENT_THREAD_CTX)
+        };
+
+        let next_ktimer = yield_ktimer(current_ktimer, elapsed);
         update_next_ktimer(next_ktimer);
 
         SCB::set_pendsv();
@@ -314,13 +323,20 @@ pub fn yieldyi() {
 
 pub fn msleepyi(msec: u32) {
     interrupt::free(|_| unsafe {
-        if !CURRENT_THREAD_IS_CFS {
+        let elapsed = elapsed_ticks_since_current_reload();
+        advance_wait_queue(elapsed);
+        let current_ktimer = if CURRENT_THREAD_IS_CFS {
+            ptr::addr_of_mut!(CFS_KTIMER.entity)
+        } else {
             let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
             (*current_rt_thread).runtime = (*current_rt_thread)
                 .runtime
                 .saturating_add(elapsed_ticks_since_current_reload());
-        }
-        let next_ktimer = yield_ktimer(0);
+
+            rt_ktimer_entity(CURRENT_THREAD_CTX)
+        };
+
+        let next_ktimer = yield_ktimer(current_ktimer, 0);
         update_next_ktimer(next_ktimer);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
@@ -331,11 +347,10 @@ pub fn msleepyi(msec: u32) {
         (*wait_entity).wait_ticks = msec.saturating_mul(ticks_per_ms());
         (*wait_entity).waitevt = 0;
 
-        let id = (*CURRENT_THREAD_CTX).id;
         if CURRENT_THREAD_IS_CFS {
-            let _ = dequeue_runq_to_waitq(id);
+            let _ = dequeue_runq_to_waitq(CURRENT_THREAD_CTX);
         } else {
-            let _ = dequeue_ktimerq_to_waitq(id);
+            let _ = dequeue_ktimerq_to_waitq(CURRENT_THREAD_CTX);
         }
 
         SCB::set_pendsv();
