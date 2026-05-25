@@ -248,9 +248,9 @@ pub fn handle_systick() {
     unsafe {
         if CURRENT_THREAD_IS_CFS {
             let cfs_timer = ptr::addr_of_mut!(CFS_KTIMER);
-            (*cfs_timer).add_runtime(elapsed);
-            if (*cfs_timer).runtime() >= (*cfs_timer).execution_ticks() {
-                (*cfs_timer).reset_runtime();
+            (*cfs_timer).add_ktimer_runtime(elapsed);
+            if (*cfs_timer).ktimer_runtime() >= (*cfs_timer).execution_ticks() {
+                (*cfs_timer).reset_ktimer_runtime();
                 // elapsed time is already counted in advance_ktimers.
                 yieldyi_with_elapsed(0);
                 return;
