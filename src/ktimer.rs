@@ -117,7 +117,7 @@ pub struct CfsKTimer {
     pub entity: KTimerEntity,
     pub name: &'static str,
     pub execution_ticks: u32,
-    pub runtime: u32,
+    pub ktimer_runtime: u32,
 }
 
 impl CfsKTimer {
@@ -126,7 +126,7 @@ impl CfsKTimer {
             entity: KTimerEntity::new(duration),
             name,
             execution_ticks,
-            runtime: 0,
+            ktimer_runtime: 0,
         }
     }
 
@@ -134,20 +134,20 @@ impl CfsKTimer {
         ptr::addr_of_mut!(self.entity)
     }
 
-    pub fn runtime(&self) -> u32 {
-        self.runtime
+    pub fn ktimer_runtime(&self) -> u32 {
+        self.ktimer_runtime
     }
 
     pub fn execution_ticks(&self) -> u32 {
         self.execution_ticks
     }
 
-    pub fn add_runtime(&mut self, elapsed: u32) {
-        self.runtime = self.runtime.saturating_add(elapsed);
+    pub fn add_ktimer_runtime(&mut self, elapsed: u32) {
+        self.ktimer_runtime = self.ktimer_runtime.saturating_add(elapsed);
     }
 
-    pub fn reset_runtime(&mut self) {
-        self.runtime = 0;
+    pub fn reset_ktimer_runtime(&mut self) {
+        self.ktimer_runtime = 0;
     }
 }
 

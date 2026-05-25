@@ -3,6 +3,7 @@
 /// Crate version taken from Cargo metadata at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+mod arch;
 mod clock;
 pub mod ktimer;
 mod rbtree;
@@ -17,6 +18,11 @@ pub use thread::{
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
+
+pub use arch::timer_cm::{
+    dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
+    init_dwt_cycle_counter, reset_elapse_counter,
+};
 
 pub use ktimer::{
     KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
