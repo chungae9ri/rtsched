@@ -14,7 +14,8 @@ mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, msleepyi, yieldyi,
+    AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, forkyi, msleepyi,
+    set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};

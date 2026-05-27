@@ -16,6 +16,7 @@ use crate::ktimer::{
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CFS_KTIMER, CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::waitq::{WaitEntity, advance_wait_queue};
+use rtt_target::rprintln;
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -95,6 +96,8 @@ pub struct RtThread {
     pub wait_entity: WaitEntity,
     ktimer_entity: *mut KTimerEntity,
     pub runtime: u32,
+    // deadline miss count
+    pub miss_cnt: u32,
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -141,6 +144,7 @@ impl ThreadControlBlock for RtThread {
                     wait_entity: WaitEntity::new(),
                     ktimer_entity: ptr::null_mut(),
                     runtime: 0,
+                    miss_cnt: 0,
                 },
             );
             ptr::addr_of_mut!((*thread).thread)
@@ -285,12 +289,24 @@ pub(crate) unsafe fn thread_from_wait_entity(entity: *mut WaitEntity) -> *mut Th
     unsafe { ptr::addr_of_mut!((*thread).thread) }
 }
 
-unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
+pub(crate) unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
     debug_assert!(!thread.is_null());
 
     (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>()
+}
+
+pub fn set_rt_thread_start_time(start_time: u32) -> bool {
+    unsafe {
+        if !CURRENT_THREAD_IS_CFS {
+            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            (*rt_thread).runtime = start_time;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Cooperatively yield the CPU from the running RT thread to the
@@ -309,9 +325,27 @@ pub fn yieldyi_with_elapsed(elapsed: u32) {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
             let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-            (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
+            (*current_rt_thread).runtime += elapsed;
 
-            rt_ktimer_entity(CURRENT_THREAD_CTX)
+            let ktimer_entity = rt_ktimer_entity(CURRENT_THREAD_CTX);
+            if (*current_rt_thread).runtime > (*ktimer_entity).duration() {
+                rprintln!(
+                    "Deadline miss in thread '{}': runtime {} ticks exceeded timer duration {} ticks",
+                    (*current_rt_thread).thread.name,
+                    (*current_rt_thread).runtime,
+                    (*ktimer_entity).duration()
+                );
+                (*current_rt_thread).miss_cnt += 1;
+            } else {
+                rprintln!(
+                    "Thread '{}' runtime updated to {} ticks",
+                    (*current_rt_thread).thread.name,
+                    (*current_rt_thread).runtime
+                );
+            }
+            (*current_rt_thread).runtime = 0;
+
+            ktimer_entity
         };
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed);

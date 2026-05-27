@@ -14,7 +14,8 @@ use crate::ktimer::{
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
 use crate::thread::{
-    ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity, yieldyi_with_elapsed,
+    ThreadCtx, ThreadState, cfs_sched_entity, rt_thread_from_thread_ctx,
+    thread_from_cfs_sched_entity, yieldyi_with_elapsed,
 };
 
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
@@ -255,6 +256,9 @@ pub fn handle_systick() {
                 yieldyi_with_elapsed(0);
                 return;
             }
+        } else {
+            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            (*rt_thread).runtime += elapsed;
         }
     }
 
