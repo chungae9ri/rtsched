@@ -336,15 +336,9 @@ pub fn yieldyi_with_elapsed(elapsed: u32) {
                     (*ktimer_entity).duration()
                 );
                 (*current_rt_thread).miss_cnt += 1;
-            } else {
-                rprintln!(
-                    "Thread '{}' runtime updated to {} ticks",
-                    (*current_rt_thread).thread.name,
-                    (*current_rt_thread).runtime
-                );
             }
-            (*current_rt_thread).runtime = 0;
 
+            (*current_rt_thread).runtime = 0;
             ktimer_entity
         };
 
