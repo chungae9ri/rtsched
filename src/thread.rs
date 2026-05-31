@@ -10,11 +10,11 @@ use cortex_m::{interrupt, peripheral::SCB};
 
 use crate::clock::ticks_per_ms;
 use crate::ktimer::{
-    KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload, update_next_ktimer,
-    yield_ktimer,
+    CFS_KTIMER, KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
+    update_next_ktimer, yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
-use crate::sched::{CFS_KTIMER, CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
+use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::waitq::{WaitEntity, advance_wait_queue};
 use rtt_target::rprintln;
 
@@ -309,6 +309,17 @@ pub fn set_rt_thread_start_time(start_time: u32) -> bool {
     }
 }
 
+pub fn current_rt_thread_runtime() -> Option<u32> {
+    interrupt::free(|_| unsafe {
+        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
+            None
+        } else {
+            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            Some((*rt_thread).runtime)
+        }
+    })
+}
+
 /// Cooperatively yield the CPU from the running RT thread to the
 /// next scheduled left-most timer in the KTimer rbtree.
 ///
@@ -316,10 +327,6 @@ pub fn set_rt_thread_start_time(start_time: u32) -> bool {
 /// job and want to give a chance to next scheduled thread.
 pub fn yieldyi() {
     let elapsed: u32 = elapsed_ticks_since_current_reload();
-    yieldyi_with_elapsed(elapsed);
-}
-
-pub fn yieldyi_with_elapsed(elapsed: u32) {
     interrupt::free(|_| unsafe {
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
@@ -336,15 +343,9 @@ pub fn yieldyi_with_elapsed(elapsed: u32) {
                     (*ktimer_entity).duration()
                 );
                 (*current_rt_thread).miss_cnt += 1;
-            } else {
-                rprintln!(
-                    "Thread '{}' runtime updated to {} ticks",
-                    (*current_rt_thread).thread.name,
-                    (*current_rt_thread).runtime
-                );
             }
-            (*current_rt_thread).runtime = 0;
 
+            (*current_rt_thread).runtime = 0;
             ktimer_entity
         };
 
@@ -363,14 +364,11 @@ pub fn msleepyi(msec: u32) {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
             let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-            (*current_rt_thread).runtime = (*current_rt_thread)
-                .runtime
-                .saturating_add(elapsed_ticks_since_current_reload());
-
+            (*current_rt_thread).runtime += elapsed;
             rt_ktimer_entity(CURRENT_THREAD_CTX)
         };
 
-        let next_ktimer = yield_ktimer(current_ktimer, 0);
+        let next_ktimer = yield_ktimer(current_ktimer, elapsed);
         update_next_ktimer(next_ktimer);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
