@@ -4,21 +4,16 @@
 use core::arch::global_asm;
 use core::ptr;
 
-use core::arch::asm;
-use cortex_m::peripheral::SCB;
-
 use crate::ktimer::{
-    CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
+    CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, is_wait_ktimer, next_ktimer,
     program_next_systick, update_next_ktimer,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
-use crate::thread::{
-    ThreadCtx, ThreadState, cfs_sched_entity, rt_thread_from_thread_ctx,
-    thread_from_cfs_sched_entity, yieldyi_with_elapsed,
-};
+use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
+use core::arch::asm;
+use cortex_m::peripheral::SCB;
 
-pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
@@ -238,6 +233,14 @@ extern "C" fn schedule() {
 }
 
 /// Handle one SysTick event and request ktimer dispatch.
+/// systick interrupt means different for KTimer types:
+/// - For CFS KTimer, it means the current CFS KTimer has exhausted its execution time slice,
+///   and does the context switch to the thread of next earliest deadline KTimer (KTimer of
+///   RT thread, CFS_KTIMER or WAIT_KTIMER) that should preempt the current thread.
+/// - For wait KTimer, it means there is a WAITING thread in the WAIT_QUEUE that needs to be
+///   woken up and moved to the runq and should be scheduled.
+/// - For RT KTimer, it means current RT thread misses its deadline. Reset its deadline with
+///   duratioin and reactivate current RT thread to be scheduled next.
 pub fn handle_systick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
@@ -247,28 +250,6 @@ pub fn handle_systick() {
     };
 
     unsafe {
-        if CURRENT_THREAD_IS_CFS {
-            let cfs_timer = ptr::addr_of_mut!(CFS_KTIMER);
-            (*cfs_timer).add_ktimer_runtime(elapsed);
-            if (*cfs_timer).ktimer_runtime() >= (*cfs_timer).execution_ticks() {
-                (*cfs_timer).reset_ktimer_runtime();
-                // elapsed time is already counted in advance_ktimers.
-                yieldyi_with_elapsed(0);
-                return;
-            }
-        } else {
-            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-            (*rt_thread).runtime += elapsed;
-        }
-    }
-
-    // This should be done before updating KTIMER_QUEUE
-    //let is_current_wait_ktimer = ktimer_queue_leftmost_is_wait_ktimer();
-    unsafe {
-        if !next_ktimer.is_null() && !is_wait_ktimer(next_ktimer) {
-            (*next_ktimer).set_active(true);
-        }
-
         update_next_ktimer(next_ktimer);
     }
 

@@ -15,9 +15,9 @@ use rtt_target::rprintln;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{CFS_RUN_QUEUE, update_from_leftmost};
-use crate::sched::CFS_KTIMER;
 use crate::thread::{
-    ThreadCtx, ThreadState, cfs_sched_entity, rt_ktimer_entity, set_rt_ktimer_entity,
+    ThreadCtx, ThreadState, cfs_sched_entity, current_rt_thread_runtime, rt_ktimer_entity,
+    rt_thread_from_thread_ctx, set_rt_ktimer_entity,
 };
 use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_first_wait_thread, remove_wait_thread,
@@ -27,6 +27,7 @@ pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
 pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
+pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
 pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::inactive();
 
 struct GlobalKTimerQueue {
@@ -493,7 +494,19 @@ pub(crate) unsafe fn yield_ktimer(entity: *mut KTimerEntity, elapsed: u32) -> *m
 
         queue.remove(entity);
 
-        (*entity).set_deadline((*entity).duration().saturating_sub(elapsed));
+        if is_cfs_ktimer(entity) {
+            let cfs_timer = ptr::addr_of_mut!(CFS_KTIMER);
+            (*cfs_timer).add_ktimer_runtime(elapsed);
+            (*entity).set_deadline(
+                (*entity)
+                    .duration()
+                    .saturating_sub((*cfs_timer).ktimer_runtime()),
+            );
+            (*cfs_timer).reset_ktimer_runtime();
+        } else {
+            let runtime = current_rt_thread_runtime().unwrap_or(0);
+            (*entity).set_deadline((*entity).duration().saturating_sub(runtime));
+        }
         (*entity).set_active(false);
         queue.advance(elapsed);
         queue.insert(entity);
@@ -654,7 +667,20 @@ impl KTimerQueue {
                 //(*expired).set_active(false);
                 //self.insert(expired);
                 wake_wait_thread(elapsed);
+            } else if is_cfs_ktimer(expired) {
+                let cfs_timer = KTimerEntity::cfs_ktimer(expired);
+                (*cfs_timer).add_ktimer_runtime(elapsed);
+                (*expired).deadline = (*expired)
+                    .duration()
+                    .saturating_sub((*cfs_timer).ktimer_runtime());
+                (*cfs_timer).reset_ktimer_runtime();
+                (*expired).set_active(false);
+                self.insert(expired);
             } else {
+                // rt_thread missed its deadline, drop and reset its deadline for next round
+                let thread_ctx = (*KTimerEntity::rt_ktimer(expired)).thread_ctx();
+                let rt_thread = rt_thread_from_thread_ctx(thread_ctx);
+                (*rt_thread).runtime = 0;
                 (*expired).deadline = (*expired).duration();
                 (*expired).set_active(true);
                 self.insert(expired);
@@ -662,6 +688,7 @@ impl KTimerQueue {
 
             let next = self.first_active();
             if next.is_null() {
+                // TODO: If no more active timers, run cpu idle thread
                 activate_cfs_ktimer()
             } else {
                 next
