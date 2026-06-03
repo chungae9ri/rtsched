@@ -11,7 +11,6 @@ use core::mem::offset_of;
 use core::ptr;
 
 use cortex_m::{interrupt, peripheral::SYST};
-use rtt_target::rprintln;
 
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{CFS_RUN_QUEUE, update_from_leftmost};
@@ -412,9 +411,9 @@ pub fn traverse_ktimer_queue() {
         let queue = &*KTIMER_QUEUE.get();
         let mut entity = queue.first();
 
-        rprintln!("ktimer queue:");
+        crate::rtsched_println!("ktimer queue:");
         while !entity.is_null() {
-            rprintln!(
+            crate::rtsched_println!(
                 "{} ktimer's deadline={}",
                 ktimer_name(entity),
                 (*entity).deadline()
