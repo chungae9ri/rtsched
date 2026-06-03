@@ -6,6 +6,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 mod arch;
 mod clock;
 pub mod ktimer;
+#[doc(hidden)]
+pub mod print;
 mod rbtree;
 mod runq;
 mod sched;
@@ -19,6 +21,8 @@ pub use thread::{
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
+
+pub use print::set_print_fn;
 
 pub use arch::timer_cm::{
     dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,

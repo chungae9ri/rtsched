@@ -16,7 +16,6 @@ use crate::ktimer::{
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::waitq::{WaitEntity, advance_wait_queue};
-use rtt_target::rprintln;
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -336,7 +335,7 @@ pub fn yieldyi() {
 
             let ktimer_entity = rt_ktimer_entity(CURRENT_THREAD_CTX);
             if (*current_rt_thread).runtime > (*ktimer_entity).duration() {
-                rprintln!(
+                crate::rtsched_println!(
                     "Deadline miss in thread '{}': runtime {} ticks exceeded timer duration {} ticks",
                     (*current_rt_thread).thread.name,
                     (*current_rt_thread).runtime,
