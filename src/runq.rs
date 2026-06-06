@@ -244,11 +244,14 @@ pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueErro
         }
 
         let entity = cfs_sched_entity(thread);
-        (*CFS_RUN_QUEUE.get()).remove(entity);
+        if (*thread).state == ThreadState::Ready {
+            (*CFS_RUN_QUEUE.get()).remove(entity);
+        }
         (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
-        program_wait_ktimer();
+        (*CFS_RUN_QUEUE.priority_sum()) -= (*entity).priority;
+        program_wait_ktimer(true);
 
         Ok(())
     })
@@ -261,7 +264,7 @@ pub fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueEr
         }
 
         remove_wait_thread(thread);
-        program_wait_ktimer();
+        program_wait_ktimer(true);
 
         (*thread).state = ThreadState::Ready;
         if (*thread).is_cfs {
