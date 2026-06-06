@@ -278,7 +278,7 @@ pub(crate) unsafe fn wake_wait_thread() {
         if !wait_thread.is_null() {
             (*wait_thread).state = ThreadState::Ready;
             if (*wait_thread).is_cfs {
-                let entity= cfs_sched_entity(wait_thread);
+                let entity = cfs_sched_entity(wait_thread);
                 (*entity).reset_links();
                 update_from_leftmost(entity);
                 *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
@@ -478,7 +478,11 @@ unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
     cfs
 }
 
-pub(crate) unsafe fn yield_ktimer(entity: *mut KTimerEntity, elapsed: u32) -> *mut KTimerEntity {
+pub(crate) unsafe fn yield_ktimer(
+    entity: *mut KTimerEntity,
+    elapsed: u32,
+    reset_runtime: bool,
+) -> *mut KTimerEntity {
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         if entity.is_null() {
@@ -497,8 +501,29 @@ pub(crate) unsafe fn yield_ktimer(entity: *mut KTimerEntity, elapsed: u32) -> *m
             );
             (*cfs_timer).reset_ktimer_runtime();
         } else {
-            let runtime = current_rt_thread_runtime().unwrap_or(0);
-            (*entity).set_deadline((*entity).duration().saturating_sub(runtime));
+            let current_rt_thread_ctx = (*KTimerEntity::rt_ktimer(entity)).thread_ctx();
+            let current_rt_thread = rt_thread_from_thread_ctx(current_rt_thread_ctx);
+
+            // Update currnt RtThread's deadline and check for deadline miss
+            (*current_rt_thread).runtime += elapsed;
+            if (*current_rt_thread).runtime > (*entity).duration() {
+                crate::rtsched_println!(
+                    "Deadline miss in thread '{}': runtime {} ticks exceeded timer duration {} ticks",
+                    (*current_rt_thread).thread.name,
+                    (*current_rt_thread).runtime,
+                    (*entity).duration()
+                );
+                (*current_rt_thread).miss_cnt += 1;
+            }
+
+            (*entity).set_deadline(
+                (*entity)
+                    .duration()
+                    .saturating_sub((*current_rt_thread).runtime),
+            );
+            if reset_runtime {
+                (*current_rt_thread).runtime = 0;
+            }
         }
         (*entity).set_active(false);
         queue.advance(elapsed);
