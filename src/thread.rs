@@ -330,25 +330,10 @@ pub fn yieldyi() {
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
-            let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-            (*current_rt_thread).runtime += elapsed;
-
-            let ktimer_entity = rt_ktimer_entity(CURRENT_THREAD_CTX);
-            if (*current_rt_thread).runtime > (*ktimer_entity).duration() {
-                crate::rtsched_println!(
-                    "Deadline miss in thread '{}': runtime {} ticks exceeded timer duration {} ticks",
-                    (*current_rt_thread).thread.name,
-                    (*current_rt_thread).runtime,
-                    (*ktimer_entity).duration()
-                );
-                (*current_rt_thread).miss_cnt += 1;
-            }
-
-            (*current_rt_thread).runtime = 0;
-            ktimer_entity
+            rt_ktimer_entity(CURRENT_THREAD_CTX)
         };
 
-        let next_ktimer = yield_ktimer(current_ktimer, elapsed);
+        let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
         update_next_ktimer(next_ktimer);
 
         SCB::set_pendsv();
@@ -362,12 +347,10 @@ pub fn msleepyi(msec: u32) {
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
-            let current_rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
-            (*current_rt_thread).runtime += elapsed;
             rt_ktimer_entity(CURRENT_THREAD_CTX)
         };
 
-        let next_ktimer = yield_ktimer(current_ktimer, elapsed);
+        let next_ktimer = yield_ktimer(current_ktimer, elapsed, false);
         update_next_ktimer(next_ktimer);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
