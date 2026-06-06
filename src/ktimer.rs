@@ -250,14 +250,16 @@ pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
     });
 }
 
-pub(crate) unsafe fn program_wait_ktimer() {
+pub(crate) unsafe fn program_wait_ktimer(wait_timer_is_in_ktimer: bool) {
     interrupt::free(|_| unsafe {
         let wait_entity = (*WAIT_QUEUE.get()).first();
 
         let wait_ktimer = ptr::addr_of_mut!(WAIT_KTIMER);
         let wait_ktimer_entity = (*wait_ktimer).entity_mut();
 
-        (*KTIMER_QUEUE.get()).remove(wait_ktimer_entity);
+        if wait_timer_is_in_ktimer {
+            (*KTIMER_QUEUE.get()).remove(wait_ktimer_entity);
+        }
         if wait_entity.is_null() {
             (*wait_ktimer_entity).set_deadline(CM_SYSTICK_RELOAD_MAX);
         } else {
@@ -270,27 +272,19 @@ pub(crate) unsafe fn program_wait_ktimer() {
     });
 }
 
-pub(crate) unsafe fn wake_wait_thread(elapsed: u32) {
+pub(crate) unsafe fn wake_wait_thread() {
     unsafe {
         let wait_thread = pop_first_wait_thread();
         if !wait_thread.is_null() {
             (*wait_thread).state = ThreadState::Ready;
             if (*wait_thread).is_cfs {
-                let entity: *mut crate::runq::SchedEntity = cfs_sched_entity(wait_thread);
+                let entity= cfs_sched_entity(wait_thread);
                 (*entity).reset_links();
                 update_from_leftmost(entity);
+                *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
                 (*CFS_RUN_QUEUE.get()).insert(entity);
-            } else {
-                let ktimer_entity = rt_ktimer_entity(wait_thread);
-                if !ktimer_entity.is_null() {
-                    (*ktimer_entity)
-                        .set_deadline((*ktimer_entity).deadline().saturating_sub(elapsed));
-                    (*ktimer_entity).set_active(true);
-                    enqueue_ktimer(ktimer_entity);
-                }
             }
         }
-        program_wait_ktimer();
     }
 }
 
@@ -347,7 +341,7 @@ pub fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueE
         (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
-        program_wait_ktimer();
+        program_wait_ktimer(true);
 
         Ok(())
     })
@@ -368,7 +362,7 @@ pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueu
 
         (*thread).state = ThreadState::Ready;
         reinsert_ktimer(ktimer_entity);
-        program_wait_ktimer();
+        program_wait_ktimer(true);
 
         Ok(())
     })
@@ -644,7 +638,7 @@ impl KTimerQueue {
 
             while let Some(entity) = self.pop_first() {
                 let entity = entity as *mut KTimerEntity;
-                if !(is_wait_ktimer(entity) && (*entity).deadline == CM_SYSTICK_RELOAD_MAX) {
+                if (*entity).deadline != CM_SYSTICK_RELOAD_MAX {
                     (*entity).deadline = (*entity).deadline.saturating_sub(elapsed);
                 }
                 advanced.insert(entity);
@@ -665,7 +659,8 @@ impl KTimerQueue {
                 //(*expired).deadline = CM_SYSTICK_RELOAD_MAX;
                 //(*expired).set_active(false);
                 //self.insert(expired);
-                wake_wait_thread(elapsed);
+                wake_wait_thread();
+                program_wait_ktimer(false);
             } else if is_cfs_ktimer(expired) {
                 let cfs_timer = KTimerEntity::cfs_ktimer(expired);
                 (*cfs_timer).add_ktimer_runtime(elapsed);
