@@ -11,11 +11,11 @@ use cortex_m::{interrupt, peripheral::SCB};
 use crate::clock::ticks_per_ms;
 use crate::ktimer::{
     CFS_KTIMER, KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
-    update_next_ktimer, yield_ktimer,
+    update_next_ktimer, update_wait_thread_ticks, yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
-use crate::waitq::{WaitEntity, advance_wait_queue};
+use crate::waitq::WaitEntity;
 
 /// Global counter for assigning unique thread IDs. Accessed only
 /// from the main thread during thread creation, so no synchronization
@@ -325,8 +325,8 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
 /// This is intended for the threads that have completed their current
 /// job and want to give a chance to next scheduled thread.
 pub fn yieldyi() {
-    let elapsed: u32 = elapsed_ticks_since_current_reload();
     interrupt::free(|_| unsafe {
+        let elapsed: u32 = elapsed_ticks_since_current_reload();
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
@@ -335,6 +335,7 @@ pub fn yieldyi() {
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
         update_next_ktimer(next_ktimer);
+        update_wait_thread_ticks(elapsed);
 
         SCB::set_pendsv();
     });
@@ -343,7 +344,6 @@ pub fn yieldyi() {
 pub fn msleepyi(msec: u32) {
     interrupt::free(|_| unsafe {
         let elapsed = elapsed_ticks_since_current_reload();
-        advance_wait_queue(elapsed);
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
@@ -352,6 +352,7 @@ pub fn msleepyi(msec: u32) {
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, false);
         update_next_ktimer(next_ktimer);
+        update_wait_thread_ticks(elapsed);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
             cfs_wait_entity(CURRENT_THREAD_CTX)
