@@ -7,7 +7,7 @@ use core::ptr;
 use crate::ktimer::{
     CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, is_wait_ktimer, next_ktimer,
-    program_next_systick, update_next_ktimer,
+    program_next_systick, update_next_ktimer, update_wait_thread_ticks,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
@@ -246,6 +246,7 @@ pub fn handle_systick() {
 
     let next_ktimer = unsafe {
         advance_ktimers(elapsed);
+        update_wait_thread_ticks(elapsed);
         dispatch_expired_ktimer(elapsed)
     };
 

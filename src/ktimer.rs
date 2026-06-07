@@ -15,11 +15,12 @@ use cortex_m::{interrupt, peripheral::SYST};
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{CFS_RUN_QUEUE, update_from_leftmost};
 use crate::thread::{
-    ThreadCtx, ThreadState, cfs_sched_entity, current_rt_thread_runtime, rt_ktimer_entity,
-    rt_thread_from_thread_ctx, set_rt_ktimer_entity,
+    ThreadCtx, ThreadState, cfs_sched_entity, rt_ktimer_entity, rt_thread_from_thread_ctx,
+    set_rt_ktimer_entity,
 };
 use crate::waitq::{
-    WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_first_wait_thread, remove_wait_thread,
+    WAIT_QUEUE, WaitQueueError, advance_wait_queue, insert_wait_thread, pop_first_wait_thread,
+    remove_wait_thread,
 };
 
 pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
@@ -272,7 +273,16 @@ pub(crate) unsafe fn program_wait_ktimer(wait_timer_is_in_ktimer: bool) {
     });
 }
 
-pub(crate) unsafe fn wake_wait_thread() {
+pub(crate) fn update_wait_thread_ticks(elapsed: u32) {
+    interrupt::free(|_| unsafe {
+        let wait_ktimer_entity = ptr::addr_of_mut!(WAIT_KTIMER.entity);
+        if (*wait_ktimer_entity).deadline != CM_SYSTICK_RELOAD_MAX {
+            advance_wait_queue(elapsed);
+        }
+    });
+}
+
+pub(crate) unsafe fn wake_wait_thread(elapsed: u32) {
     unsafe {
         let wait_thread = pop_first_wait_thread();
         if !wait_thread.is_null() {
@@ -283,6 +293,20 @@ pub(crate) unsafe fn wake_wait_thread() {
                 update_from_leftmost(entity);
                 *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
                 (*CFS_RUN_QUEUE.get()).insert(entity);
+            } else {
+                let ktimer_entity = rt_ktimer_entity(wait_thread);
+                let rt_thread = rt_thread_from_thread_ctx(wait_thread);
+
+                (*rt_thread).runtime += elapsed;
+
+                (*ktimer_entity).set_active(true);
+                (*ktimer_entity).set_deadline(
+                    (*ktimer_entity)
+                        .duration()
+                        .saturating_sub((*rt_thread).runtime),
+                );
+                (*ktimer_entity).reset_links();
+                (*KTIMER_QUEUE.get()).insert(ktimer_entity);
             }
         }
     }
@@ -681,10 +705,7 @@ impl KTimerQueue {
 
             let expired = expired as *mut KTimerEntity;
             if is_wait_ktimer(expired) {
-                //(*expired).deadline = CM_SYSTICK_RELOAD_MAX;
-                //(*expired).set_active(false);
-                //self.insert(expired);
-                wake_wait_thread();
+                wake_wait_thread(elapsed);
                 program_wait_ktimer(false);
             } else if is_cfs_ktimer(expired) {
                 let cfs_timer = KTimerEntity::cfs_ktimer(expired);
