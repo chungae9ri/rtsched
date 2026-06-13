@@ -35,7 +35,7 @@ pub use ktimer::{
     traverse_ktimer_queue_fn,
 };
 
-pub use runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq, traverse_run_queue};
+pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};
 
 pub use sched::{handle_systick, init_cfs, spawn_main_thread};
 

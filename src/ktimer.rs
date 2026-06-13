@@ -284,13 +284,22 @@ pub(crate) fn update_wait_thread_ticks(elapsed: u32) {
 
 pub(crate) unsafe fn wake_wait_thread(elapsed: u32) {
     unsafe {
-        let wait_thread = pop_first_wait_thread();
-        if !wait_thread.is_null() {
+        loop {
+            let wait_entity = (*WAIT_QUEUE.get()).first();
+            if wait_entity.is_null() || (*wait_entity).wait_ticks != 0 {
+                break;
+            }
+
+            let wait_thread = pop_first_wait_thread();
+            if wait_thread.is_null() {
+                break;
+            }
+
             (*wait_thread).state = ThreadState::Ready;
             if (*wait_thread).is_cfs {
                 let entity = cfs_sched_entity(wait_thread);
                 (*entity).reset_links();
-                update_from_leftmost(entity);
+                update_from_leftmost(entity, *CFS_RUN_QUEUE.priority_sum());
                 *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
                 (*CFS_RUN_QUEUE.get()).insert(entity);
             } else {
@@ -699,31 +708,43 @@ impl KTimerQueue {
 
     pub unsafe fn dispatch_expired(&mut self, elapsed: u32) -> *mut KTimerEntity {
         unsafe {
-            let Some(expired) = self.pop_first() else {
-                return ptr::null_mut();
-            };
+            while let Some(expired) = self.pop_first() {
+                let expired = expired as *mut KTimerEntity;
+                if (*expired).deadline() != 0 {
+                    self.insert(expired);
+                    break;
+                }
 
-            let expired = expired as *mut KTimerEntity;
-            if is_wait_ktimer(expired) {
-                wake_wait_thread(elapsed);
-                program_wait_ktimer(false);
-            } else if is_cfs_ktimer(expired) {
-                let cfs_timer = KTimerEntity::cfs_ktimer(expired);
-                (*cfs_timer).add_ktimer_runtime(elapsed);
-                (*expired).deadline = (*expired)
-                    .duration()
-                    .saturating_sub((*cfs_timer).ktimer_runtime());
-                (*cfs_timer).reset_ktimer_runtime();
-                (*expired).set_active(false);
-                self.insert(expired);
-            } else {
-                // rt_thread missed its deadline, drop and reset its deadline for next round
-                let thread_ctx = (*KTimerEntity::rt_ktimer(expired)).thread_ctx();
-                let rt_thread = rt_thread_from_thread_ctx(thread_ctx);
-                (*rt_thread).runtime = 0;
-                (*expired).deadline = (*expired).duration();
-                (*expired).set_active(true);
-                self.insert(expired);
+                if is_wait_ktimer(expired) {
+                    wake_wait_thread(elapsed);
+                    // Insert expired wait_ktimer back to the KTIMER_QUEUE.
+                    program_wait_ktimer(false);
+                } else if is_cfs_ktimer(expired) {
+                    let cfs_timer = KTimerEntity::cfs_ktimer(expired);
+                    (*cfs_timer).add_ktimer_runtime(elapsed);
+                    (*expired).deadline = (*expired)
+                        .duration()
+                        .saturating_sub((*cfs_timer).ktimer_runtime());
+                    (*cfs_timer).reset_ktimer_runtime();
+                    (*expired).set_active(false);
+                    self.insert(expired);
+                } else {
+                    let thread_ctx = (*KTimerEntity::rt_ktimer(expired)).thread_ctx();
+                    let rt_thread = rt_thread_from_thread_ctx(thread_ctx);
+                    if (*expired).is_active() {
+                        crate::rtsched_println!(
+                            "Deadline miss in thread '{}': runtime {} ticks exceeded timer duration {} ticks",
+                            (*rt_thread).thread.name,
+                            (*rt_thread).runtime,
+                            (*expired).duration()
+                        );
+                        (*rt_thread).miss_cnt += 1;
+                    }
+                    (*rt_thread).runtime = 0;
+                    (*expired).deadline = (*expired).duration();
+                    (*expired).set_active(true);
+                    self.insert(expired);
+                }
             }
 
             let next = self.first_active();
