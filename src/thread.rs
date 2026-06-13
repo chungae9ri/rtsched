@@ -115,6 +115,8 @@ impl ThreadControlBlock for CfsThread {
     const IS_CFS: bool = true;
 
     unsafe fn init(thread: *mut Self, common: ThreadCtx, priority: u32) -> *mut ThreadCtx {
+        assert!(priority != 0, "CFS thread priority must be non-zero");
+
         unsafe {
             ptr::write(
                 thread,

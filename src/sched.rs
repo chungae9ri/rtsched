@@ -239,8 +239,9 @@ extern "C" fn schedule() {
 ///   RT thread, CFS_KTIMER or WAIT_KTIMER) that should preempt the current thread.
 /// - For wait KTimer, it means there is a WAITING thread in the WAIT_QUEUE that needs to be
 ///   woken up and moved to the runq and should be scheduled.
-/// - For RT KTimer, it means current RT thread misses its deadline. Reset its deadline with
-///   duratioin and reactivate current RT thread to be scheduled next.
+/// - For RT KTimer, if active is true, it means current RT thread misses its deadline.
+///   If active is false, current RT thread finishes its job before its deadline.
+///   Both cases reset its deadline with duratioin and reactivate RT thread to be scheduled next.
 pub fn handle_systick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
