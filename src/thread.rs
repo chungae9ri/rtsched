@@ -352,8 +352,7 @@ pub fn msleepyi(msec: u32) {
             rt_ktimer_entity(CURRENT_THREAD_CTX)
         };
 
-        let next_ktimer = yield_ktimer(current_ktimer, elapsed, false);
-        update_next_ktimer(next_ktimer);
+        let _ = yield_ktimer(current_ktimer, elapsed, false);
         update_wait_thread_ticks(elapsed);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {

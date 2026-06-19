@@ -31,8 +31,8 @@ pub use arch::timer_cm::{
 
 pub use ktimer::{
     KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
-    enqueue_ktimerq_from_waitq, init_ktimer_queue, next_ktimer_reload, traverse_ktimer_queue,
-    traverse_ktimer_queue_fn,
+    enqueue_ktimerq_from_waitq, init_ktimer_queue, is_active_ktimer, next_ktimer_reload,
+    traverse_ktimer_queue, traverse_ktimer_queue_fn,
 };
 
 pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};

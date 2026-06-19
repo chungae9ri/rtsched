@@ -153,16 +153,16 @@ extern "C" fn schedule() {
         //   RT thread,preempt the CURRENT_THREAD_CTX with next RT thread.
         if CURRENT_THREAD_IS_CFS && (*CURRENT_THREAD_CTX).state == ThreadState::Running {
             let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
-            (*current_entity).sched_tick_cnt += u64::from(elapsed_ticks_since_last_interrupt());
+            let sched_tick_added = u64::from(elapsed_ticks_since_last_interrupt());
             let priority_sum = *CFS_RUN_QUEUE.priority_sum();
             if priority_sum == 0 {
                 return;
             }
-            let sched_tick_cnt = (*current_entity).sched_tick_cnt;
             let priority = u64::from((*current_entity).priority);
             let priority_sum = u64::from(priority_sum);
 
-            (*current_entity).vruntime = sched_tick_cnt * priority / priority_sum;
+            (*current_entity).vruntime += sched_tick_added * priority / priority_sum;
+            (*current_entity).sched_tick_cnt += sched_tick_added;
         }
 
         if is_cfs_ktimer(next_ktimer) {

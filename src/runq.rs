@@ -197,17 +197,19 @@ pub(crate) unsafe fn init_cfs_rq() {
 /// Align a detached entity's vruntime and sched_tick_cnt with the left-most queued entity.
 ///
 /// If the run queue is empty, the entity keeps its current vruntime.
-pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity, priority_sum: u32) {
+pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
     if entity.is_null() {
         return;
     }
 
     unsafe {
+        let priority_sum = *CFS_RUN_QUEUE.priority_sum();
+        let priority = (*entity).priority;
         let leftmost = (*CFS_RUN_QUEUE.get()).first();
+
         if !leftmost.is_null() {
             (*entity).vruntime = (*leftmost).vruntime;
-            (*entity).sched_tick_cnt =
-                (*entity).vruntime * priority_sum as u64 / (*entity).priority as u64;
+            (*entity).sched_tick_cnt = (*entity).vruntime * priority_sum as u64 / priority as u64;
         }
     }
 }
@@ -220,7 +222,7 @@ pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
         (*thread).state = ThreadState::Ready;
         let entity = cfs_sched_entity(thread);
         (*entity).reset_links();
-        update_from_leftmost(entity, *CFS_RUN_QUEUE.priority_sum());
+        update_from_leftmost(entity);
         (*CFS_RUN_QUEUE.get()).insert(entity);
         *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
     }
@@ -233,8 +235,38 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
         if (*thread).state == ThreadState::Ready {
             let entity = cfs_sched_entity(thread);
             (*CFS_RUN_QUEUE.get()).remove(entity);
-            *CFS_RUN_QUEUE.priority_sum() -= (*entity).priority;
+            let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
+            *CFS_RUN_QUEUE.priority_sum() = priority_sum;
         }
+    }
+}
+
+pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
+    unsafe {
+        let entity = cfs_sched_entity(thread);
+        let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_add((*entity).priority);
+
+        (*entity).reset_links();
+        *CFS_RUN_QUEUE.priority_sum() = priority_sum;
+        (*thread).state = ThreadState::Ready;
+
+        // Update cfs_rq with priority_sum
+        let tree = &mut *CFS_RUN_QUEUE.get();
+        let mut updated = RBTree::new();
+
+        while let Some(entity) = tree.pop_first() {
+            let priority_sum = *CFS_RUN_QUEUE.priority_sum();
+            let priority = (*entity).priority;
+
+            (*entity).sched_tick_cnt = (*entity).vruntime * priority_sum as u64 / priority as u64;
+
+            updated.insert(entity);
+        }
+
+        *tree = updated;
+
+        update_from_leftmost(entity);
+        (*CFS_RUN_QUEUE.get()).insert(entity);
     }
 }
 
@@ -245,14 +277,16 @@ pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueErro
         }
 
         let entity = cfs_sched_entity(thread);
+        // If (*thread).state is Running, it is not in the runq.
         if (*thread).state == ThreadState::Ready {
             (*CFS_RUN_QUEUE.get()).remove(entity);
         }
         (*thread).state = ThreadState::Waiting;
 
         insert_wait_thread(thread);
-        (*CFS_RUN_QUEUE.priority_sum()) -= (*entity).priority;
-        program_wait_ktimer(true);
+        let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
+        *CFS_RUN_QUEUE.priority_sum() = priority_sum;
+        program_wait_ktimer();
 
         Ok(())
     })
