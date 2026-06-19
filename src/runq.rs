@@ -241,6 +241,9 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     }
 }
 
+/// Since this is called from dispatch_expired, WAIT_KTIMER is already popped
+/// from the KTIMER_QUEUE, so calling program_wait_ktimer() at the end of this function
+/// will generate a program panic.
 pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
     unsafe {
         let entity = cfs_sched_entity(thread);

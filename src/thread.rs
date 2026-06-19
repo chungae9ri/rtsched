@@ -71,6 +71,20 @@ impl ThreadCtx {
             None
         }
     }
+
+    /// Return this thread's remaining wait ticks and wait event.
+    pub fn wait_info(&self) -> (u32, u32) {
+        unsafe {
+            let thread = self as *const ThreadCtx as *mut ThreadCtx;
+            let entity = if self.is_cfs {
+                cfs_wait_entity(thread)
+            } else {
+                rt_wait_entity(thread)
+            };
+
+            ((*entity).wait_ticks, (*entity).waitevt)
+        }
+    }
 }
 
 /// Thread control block for CFS-scheduled threads.

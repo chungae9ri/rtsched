@@ -39,4 +39,4 @@ pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};
 
 pub use sched::{handle_systick, init_cfs, spawn_main_thread};
 
-pub use waitq::WaitQueueError;
+pub use waitq::{WaitQueueError, traverse_wait_queue};
