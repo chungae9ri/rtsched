@@ -99,6 +99,31 @@ unsafe impl RBTreeNode for WaitEntity {
     }
 }
 
+/// Traverse waiting threads in ascending wait-time order.
+///
+/// Pass `None` to return the first waiting thread. Pass the previously returned
+/// thread to return the next one. Returns `None` after the final waiting thread.
+///
+/// # Safety
+///
+/// The caller must ensure that any provided thread pointer remains valid and
+/// that the wait queue is not mutated during traversal.
+pub unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
+    unsafe {
+        let tree = &*WAIT_QUEUE.get();
+        let entity = match cursor {
+            None => tree.first(),
+            Some(thread) => tree.next(wait_entity(thread)),
+        };
+
+        if entity.is_null() {
+            None
+        } else {
+            Some(thread_from_wait_entity(entity))
+        }
+    }
+}
+
 pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
     unsafe {
         if (*thread).is_cfs {
