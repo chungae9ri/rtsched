@@ -53,6 +53,7 @@ pub struct KTimerEntity {
     deadline: u32,
     node: RbNode,
     active: bool,
+    pub miss_cnt: u32,
 }
 
 /// KTimerDuration is immutable, shouldn't be changed after initialization.
@@ -77,6 +78,7 @@ impl KTimerEntity {
             deadline: duration,
             node: RbNode::new(),
             active: true,
+            miss_cnt: 0,
         }
     }
 
@@ -173,6 +175,7 @@ impl WaitKTimer {
                 deadline: CM_SYSTICK_RELOAD_MAX,
                 node: RbNode::new(),
                 active: false,
+                miss_cnt: 0,
             },
             name: "wait",
         }
@@ -245,9 +248,10 @@ pub unsafe fn init_ktimer_queue() {
 
 pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
     interrupt::free(|_| unsafe {
+        let queue = &mut *KTIMER_QUEUE.get();
         (*entity).reset_links();
-        (*KTIMER_QUEUE.get()).insert(entity);
-        refresh_next_ktimer();
+        queue.insert(entity);
+        refresh_next_ktimer(queue);
     });
 }
 
@@ -265,13 +269,14 @@ unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
 
 pub(crate) unsafe fn program_wait_ktimer() {
     interrupt::free(|_| unsafe {
+        let queue = &mut *KTIMER_QUEUE.get();
         let wait_ktimer = ptr::addr_of_mut!(WAIT_KTIMER);
         let wait_ktimer_entity = (*wait_ktimer).entity_mut();
 
-        (*KTIMER_QUEUE.get()).remove(wait_ktimer_entity);
+        queue.remove(wait_ktimer_entity);
         update_wait_ktimer_deadline(wait_ktimer_entity);
-        (*KTIMER_QUEUE.get()).insert(wait_ktimer_entity);
-        refresh_next_ktimer();
+        queue.insert(wait_ktimer_entity);
+        refresh_next_ktimer(queue);
     });
 }
 
@@ -320,10 +325,11 @@ unsafe fn remove_ktimer(entity: *mut KTimerEntity) -> *mut KTimerEntity {
             return ptr::null_mut();
         }
 
-        let removed = (*KTIMER_QUEUE.get()).remove(entity);
+        let queue = &mut *KTIMER_QUEUE.get();
+        let removed = queue.remove(entity);
         (*removed).set_active(false);
         if NEXT_KTIMER == removed {
-            refresh_next_ktimer();
+            refresh_next_ktimer(queue);
         }
         removed
     })
@@ -335,20 +341,43 @@ unsafe fn reinsert_ktimer(entity: *mut KTimerEntity) {
             return;
         }
 
+        let queue = &mut *KTIMER_QUEUE.get();
         (*entity).set_active(true);
         (*entity).reset_links();
-        (*KTIMER_QUEUE.get()).insert(entity);
+        queue.insert(entity);
 
-        refresh_next_ktimer();
+        refresh_next_ktimer(queue);
     });
 }
 
-unsafe fn refresh_next_ktimer() {
+unsafe fn normalize_next_ktimer(
+    queue: &mut KTimerQueue,
+    mut entity: *mut KTimerEntity,
+) -> *mut KTimerEntity {
     unsafe {
-        NEXT_KTIMER = (*KTIMER_QUEUE.get()).first_active();
-        if NEXT_KTIMER.is_null() {
-            NEXT_KTIMER = activate_cfs_ktimer();
+        if entity.is_null() {
+            entity = activate_cfs_ktimer();
         }
+
+        if !entity.is_null() && (*entity).deadline() == 0 {
+            queue.remove(entity);
+            (*entity).miss_cnt = (*entity).miss_cnt.saturating_add(1);
+            (*entity).set_deadline((*entity).duration());
+            queue.insert(entity);
+
+            entity = queue.first_active();
+            if entity.is_null() {
+                entity = activate_cfs_ktimer();
+            }
+        }
+
+        entity
+    }
+}
+
+unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
+    unsafe {
+        NEXT_KTIMER = normalize_next_ktimer(queue, queue.first_active());
     }
 }
 
@@ -422,7 +451,8 @@ pub(crate) unsafe fn dispatch_expired_ktimer(elapsed: u32) -> *mut KTimerEntity 
 
 pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
     interrupt::free(|_| unsafe {
-        NEXT_KTIMER = entity;
+        let queue = &mut *KTIMER_QUEUE.get();
+        NEXT_KTIMER = normalize_next_ktimer(queue, entity);
     });
 }
 
@@ -552,7 +582,7 @@ pub(crate) unsafe fn yield_ktimer(
                     (*current_rt_thread).runtime,
                     (*entity).duration()
                 );
-                (*current_rt_thread).miss_cnt += 1;
+                (*entity).miss_cnt += 1;
             }
 
             (*entity).set_deadline(
@@ -593,7 +623,7 @@ pub(crate) fn program_next_systick() -> Option<u32> {
             (*entity).deadline()
         };
 
-        (*SYST::PTR).rvr.write(reload);
+        (*SYST::PTR).rvr.write(reload + 1);
         (*SYST::PTR).cvr.write(0);
 
         Some(reload)
@@ -740,7 +770,7 @@ impl KTimerQueue {
                             (*rt_thread).runtime,
                             (*expired).duration()
                         );
-                        (*rt_thread).miss_cnt += 1;
+                        (*expired).miss_cnt += 1;
                     }
                     (*rt_thread).runtime = 0;
                     (*expired).deadline = (*expired).duration();
