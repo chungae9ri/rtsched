@@ -109,8 +109,6 @@ pub struct RtThread {
     pub wait_entity: WaitEntity,
     ktimer_entity: *mut KTimerEntity,
     pub runtime: u32,
-    // deadline miss count
-    pub miss_cnt: u32,
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -159,7 +157,6 @@ impl ThreadControlBlock for RtThread {
                     wait_entity: WaitEntity::new(),
                     ktimer_entity: ptr::null_mut(),
                     runtime: 0,
-                    miss_cnt: 0,
                 },
             );
             ptr::addr_of_mut!((*thread).thread)
