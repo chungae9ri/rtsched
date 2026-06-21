@@ -6,7 +6,7 @@ use core::ptr;
 use crate::arch::ctx_swtich::request_context_switch;
 use crate::ktimer::{
     CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
-    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, is_wait_ktimer, next_ktimer,
+    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
     program_next_systick, update_next_ktimer, update_wait_thread_ticks,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
@@ -98,17 +98,6 @@ extern "C" fn schedule() {
                     CURRENT_THREAD_CTX = next_thread;
                     CURRENT_THREAD_IS_CFS = true;
                 }
-            }
-        } else if is_wait_ktimer(next_ktimer) {
-            // TODO: If next_ktimer is a wait ktimer, pick next active ktimer (rt or cfs).
-            //       If there is no active ktimer (rt or cfs) to run, run cpu_idle thread.
-            //       For now, we just run CFS KTimer thread.
-            if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
-                let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
-
-                (*next_thread).state = ThreadState::Running;
-                CURRENT_THREAD_CTX = next_thread;
-                CURRENT_THREAD_IS_CFS = true;
             }
         } else {
             let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
