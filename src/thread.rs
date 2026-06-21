@@ -6,8 +6,9 @@
 use core::mem::offset_of;
 use core::ptr;
 
-use cortex_m::{interrupt, peripheral::SCB};
+use cortex_m::interrupt;
 
+use crate::arch::ctx_swtich::request_context_switch;
 use crate::clock::ticks_per_ms;
 use crate::ktimer::{
     CFS_KTIMER, KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
@@ -350,7 +351,7 @@ pub fn yieldyi() {
         update_next_ktimer(next_ktimer);
         update_wait_thread_ticks(elapsed);
 
-        SCB::set_pendsv();
+        request_context_switch();
     });
 }
 
@@ -380,6 +381,6 @@ pub fn msleepyi(msec: u32) {
             let _ = dequeue_ktimerq_to_waitq(CURRENT_THREAD_CTX);
         }
 
-        SCB::set_pendsv();
+        request_context_switch();
     });
 }

@@ -24,6 +24,8 @@ pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 
 pub use print::set_print_fn;
 
+pub use arch::ctx_swtich::spawn_main_thread;
+
 pub use arch::timer_cm::{
     dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
     init_dwt_cycle_counter, reset_elapse_counter,
@@ -37,6 +39,6 @@ pub use ktimer::{
 
 pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};
 
-pub use sched::{handle_systick, init_cfs, spawn_main_thread};
+pub use sched::{handle_sched_tick, init_cfs};
 
 pub use waitq::{WaitQueueError, traverse_wait_queue};
