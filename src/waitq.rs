@@ -136,20 +136,27 @@ pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
 
 pub(crate) unsafe fn advance_wait_queue(elapsed: u32) {
     unsafe {
-        let tree = &*WAIT_QUEUE.get();
-        let mut entity = tree.first();
+        let tree = &mut *WAIT_QUEUE.get();
+        let mut advanced = RBTree::new();
 
-        while !entity.is_null() {
-            let next = tree.next(entity);
+        while let Some(entity) = tree.pop_first() {
+            let entity = entity as *mut WaitEntity;
             (*entity).wait_ticks = (*entity).wait_ticks.saturating_sub(elapsed);
-            entity = next;
+            advanced.insert(entity);
         }
+
+        *tree = advanced;
     }
 }
 
-pub(crate) unsafe fn pop_first_wait_thread() -> *mut ThreadCtx {
+pub(crate) unsafe fn pop_expired_wait_thread() -> *mut ThreadCtx {
     unsafe {
         let tree = &mut *WAIT_QUEUE.get();
+        let first = tree.first();
+        if first.is_null() || (*first).wait_ticks != 0 {
+            return ptr::null_mut();
+        }
+
         let Some(entity) = tree.pop_first() else {
             return ptr::null_mut();
         };

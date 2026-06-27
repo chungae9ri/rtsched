@@ -18,7 +18,7 @@ use crate::thread::{
     ThreadCtx, ThreadState, rt_ktimer_entity, rt_thread_from_thread_ctx, set_rt_ktimer_entity,
 };
 use crate::waitq::{
-    WAIT_QUEUE, WaitQueueError, advance_wait_queue, insert_wait_thread, pop_first_wait_thread,
+    WAIT_QUEUE, WaitQueueError, advance_wait_queue, insert_wait_thread, pop_expired_wait_thread,
     remove_wait_thread,
 };
 
@@ -292,7 +292,7 @@ pub(crate) fn update_wait_thread_ticks(elapsed: u32) {
 pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
     unsafe {
         loop {
-            let wait_thread = pop_first_wait_thread();
+            let wait_thread = pop_expired_wait_thread();
             if wait_thread.is_null() {
                 break;
             }
