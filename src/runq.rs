@@ -9,7 +9,7 @@ use cortex_m::interrupt;
 
 use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::sched::CURRENT_THREAD_CTX;
+use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
 use crate::waitq::{WaitQueueError, insert_wait_thread};
 
@@ -137,13 +137,13 @@ pub(crate) fn thread_is_cfs(thread: *const ThreadCtx) -> bool {
     unsafe { (*thread).is_cfs }
 }
 
-/// Traverse the scheduler-visible threads, including the running thread.
+/// Traverse the CFS scheduler-visible threads, including the running CFS thread.
 ///
-/// Pass `None` to get the CURRENT_THREAD_CTX running thread when one exists; otherwise
-/// this returns the first queued thread. Pass the previously returned thread to
-/// get the next entry. After the running thread, traversal continues through
-/// the run queue in ascending vruntime order. Returns `None` after the last
-/// queued thread.
+/// Pass `None` to get the CURRENT_THREAD_CTX running thread when it is a CFS
+/// thread; otherwise this returns the first queued CFS thread. Pass the
+/// previously returned thread to get the next entry. After the running CFS
+/// thread, traversal continues through the run queue in ascending vruntime
+/// order. Returns `None` after the last queued CFS thread.
 ///
 /// # Safety
 ///
@@ -155,7 +155,7 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut 
         let tree = &*CFS_RUN_QUEUE.get();
         match cursor {
             None => {
-                if !CURRENT_THREAD_CTX.is_null() {
+                if CURRENT_THREAD_IS_CFS && !CURRENT_THREAD_CTX.is_null() {
                     Some(CURRENT_THREAD_CTX)
                 } else {
                     let first = tree.first();
