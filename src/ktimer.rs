@@ -214,17 +214,13 @@ impl RtKTimer {
         self.thread_ctx
     }
 
-    pub fn init_thread_ctx(&mut self, thread_ctx: *mut ThreadCtx) {
+    pub fn init_rt_ktimer(&mut self, thread_ctx: *mut ThreadCtx) {
         self.thread_ctx = thread_ctx;
         if !thread_ctx.is_null() {
             unsafe {
                 set_rt_ktimer_entity(thread_ctx, self.entity_mut());
             }
         }
-    }
-
-    pub fn set_thread_ctx(&mut self, thread_ctx: *mut ThreadCtx) {
-        self.init_thread_ctx(thread_ctx);
     }
 }
 
