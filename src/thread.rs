@@ -11,8 +11,9 @@ use cortex_m::interrupt;
 use crate::arch::ctx_swtich::request_context_switch;
 use crate::clock::ticks_per_ms;
 use crate::ktimer::{
-    CFS_KTIMER, KTimerEntity, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
-    update_next_ktimer, update_wait_thread_ticks, yield_ktimer,
+    CFS_KTIMER, KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq,
+    elapsed_ticks_since_current_reload, enqueue_ktimer, update_next_ktimer,
+    update_wait_thread_ticks, yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
@@ -116,18 +117,26 @@ pub struct RtThread {
 pub trait ThreadControlBlock {
     const IS_CFS: bool;
 
+    /// Scheduler-class-specific initialization argument.
+    type InitArgs;
+
     /// Initialize the concrete thread storage and return its common thread pointer.
     ///
     /// # Safety
     ///
     /// `thread` must point to valid writable storage for `Self`.
-    unsafe fn init(thread: *mut Self, common: ThreadCtx, priority: u32) -> *mut ThreadCtx;
+    unsafe fn init(thread: *mut Self, common: ThreadCtx, args: Self::InitArgs) -> *mut ThreadCtx;
 }
 
 impl ThreadControlBlock for CfsThread {
     const IS_CFS: bool = true;
+    type InitArgs = u32;
 
-    unsafe fn init(thread: *mut Self, common: ThreadCtx, priority: u32) -> *mut ThreadCtx {
+    unsafe fn init(
+        thread: *mut Self,
+        common: ThreadCtx,
+        priority: Self::InitArgs,
+    ) -> *mut ThreadCtx {
         assert!(priority != 0, "CFS thread priority must be non-zero");
 
         unsafe {
@@ -148,8 +157,11 @@ impl ThreadControlBlock for CfsThread {
 
 impl ThreadControlBlock for RtThread {
     const IS_CFS: bool = false;
+    type InitArgs = *mut RtKTimer;
 
-    unsafe fn init(thread: *mut Self, common: ThreadCtx, _priority: u32) -> *mut ThreadCtx {
+    unsafe fn init(thread: *mut Self, common: ThreadCtx, ktimer: Self::InitArgs) -> *mut ThreadCtx {
+        assert!(!ktimer.is_null(), "RT thread ktimer must be non-null");
+
         unsafe {
             ptr::write(
                 thread,
@@ -160,7 +172,10 @@ impl ThreadControlBlock for RtThread {
                     runtime: 0,
                 },
             );
-            ptr::addr_of_mut!((*thread).thread)
+            let common_thread = ptr::addr_of_mut!((*thread).thread);
+            (*ktimer).init_rt_ktimer(common_thread);
+            enqueue_ktimer((*ktimer).entity_mut());
+            common_thread
         }
     }
 }
@@ -171,7 +186,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     entry: extern "C" fn(*mut core::ffi::c_void) -> !,
     arg: *mut core::ffi::c_void,
     name: &'static str,
-    priority: u32,
+    init_args: T::InitArgs,
 ) -> *mut ThreadCtx {
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
@@ -218,7 +233,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             state: ThreadState::Ready,
             is_cfs: T::IS_CFS,
         };
-        T::init(thread, common, priority)
+        T::init(thread, common, init_args)
     }
 }
 
