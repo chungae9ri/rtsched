@@ -1,9 +1,48 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 /// Crate version taken from Cargo metadata at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(target_arch = "arm")]
 mod arch;
+#[cfg(not(target_arch = "arm"))]
+mod arch {
+    pub mod ctx_swtich {
+        use crate::thread::ThreadCtx;
+
+        pub unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
+            panic!("spawn_main_thread is only available on Cortex-M targets")
+        }
+
+        pub(crate) fn request_context_switch() {}
+    }
+
+    pub mod timer_cm {
+        use cortex_m::peripheral::{DCB, DWT};
+
+        pub fn init_dwt_cycle_counter(_dcb: &mut DCB, _dwt: &mut DWT) -> bool {
+            false
+        }
+
+        pub fn dwt_cycle_count() -> u32 {
+            0
+        }
+
+        pub fn reset_elapse_counter() {}
+
+        pub fn get_elapse_cycles() -> u32 {
+            0
+        }
+
+        pub fn get_elapse_msec() -> u32 {
+            0
+        }
+
+        pub fn get_elapse_msec_since(_start_cycle: u32) -> u32 {
+            0
+        }
+    }
+}
 mod clock;
 pub mod ktimer;
 #[doc(hidden)]

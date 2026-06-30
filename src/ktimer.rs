@@ -243,12 +243,21 @@ pub unsafe fn init_ktimer_queue() {
 }
 
 pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
+    #[cfg(target_arch = "arm")]
     interrupt::free(|_| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         (*entity).reset_links();
         queue.insert(entity);
         refresh_next_ktimer(queue);
     });
+
+    #[cfg(not(target_arch = "arm"))]
+    unsafe {
+        let queue = &mut *KTIMER_QUEUE.get();
+        (*entity).reset_links();
+        queue.insert(entity);
+        refresh_next_ktimer(queue);
+    }
 }
 
 unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
@@ -825,5 +834,169 @@ impl KTimerQueue {
 impl Default for KTimerQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec::Vec;
+
+    fn collect_deadlines(queue: &KTimerQueue) -> Vec<u32> {
+        let mut deadlines = Vec::new();
+        let mut entity = queue.first();
+
+        while !entity.is_null() {
+            unsafe {
+                deadlines.push((*entity).deadline());
+            }
+            entity = queue.next(entity);
+        }
+
+        deadlines
+    }
+
+    #[test]
+    fn reload_from_ticks_converts_to_systick_reload() {
+        assert_eq!(reload_from_ticks(0), None);
+        assert_eq!(reload_from_ticks(1), Some(0));
+        assert_eq!(reload_from_ticks(42), Some(41));
+        assert_eq!(
+            reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 1),
+            Some(CM_SYSTICK_RELOAD_MAX)
+        );
+        assert_eq!(reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 2), None);
+    }
+
+    #[test]
+    fn insert_orders_timers_by_deadline() {
+        let mut queue = KTimerQueue::new();
+        let mut timers = [
+            KTimerEntity::new(30),
+            KTimerEntity::new(10),
+            KTimerEntity::new(20),
+            KTimerEntity::new(5),
+        ];
+
+        for timer in &mut timers {
+            unsafe {
+                queue.insert(timer);
+            }
+        }
+
+        assert_eq!(queue.len(), timers.len());
+        assert_eq!(collect_deadlines(&queue), [5, 10, 20, 30]);
+        assert_eq!(queue.next_deadline(), Some(5));
+        assert_eq!(queue.next_reload(), Some(4));
+        unsafe {
+            assert_eq!((*queue.first()).deadline(), 5);
+            assert_eq!((*queue.last()).deadline(), 30);
+        }
+    }
+
+    #[test]
+    fn equal_deadlines_keep_strict_entity_ordering() {
+        let mut queue = KTimerQueue::new();
+        let mut first = KTimerEntity::new(12);
+        let mut second = KTimerEntity::new(12);
+
+        unsafe {
+            queue.insert(&mut first);
+            queue.insert(&mut second);
+        }
+
+        assert_eq!(queue.len(), 2);
+        assert_eq!(collect_deadlines(&queue), [12, 12]);
+    }
+
+    #[test]
+    fn advance_saturates_deadlines_and_keeps_max_deadline_parked() {
+        let mut queue = KTimerQueue::new();
+        let mut short = KTimerEntity::new(3);
+        let mut long = KTimerEntity::new(20);
+        let mut parked = KTimerEntity::new(CM_SYSTICK_RELOAD_MAX);
+
+        unsafe {
+            queue.insert(&mut short);
+            queue.insert(&mut long);
+            queue.insert(&mut parked);
+            queue.advance(5);
+        }
+
+        assert_eq!(short.deadline(), 0);
+        assert_eq!(long.deadline(), 15);
+        assert_eq!(parked.deadline(), CM_SYSTICK_RELOAD_MAX);
+        assert_eq!(collect_deadlines(&queue), [0, 15, CM_SYSTICK_RELOAD_MAX]);
+    }
+
+    #[test]
+    fn first_active_skips_inactive_timers() {
+        let mut queue = KTimerQueue::new();
+        let mut inactive_early = KTimerEntity::new(5);
+        let mut active_late = KTimerEntity::new(20);
+        let mut inactive_middle = KTimerEntity::new(10);
+
+        inactive_early.set_active(false);
+        inactive_middle.set_active(false);
+
+        unsafe {
+            queue.insert(&mut active_late);
+            queue.insert(&mut inactive_early);
+            queue.insert(&mut inactive_middle);
+        }
+
+        assert!(ptr::eq(queue.first_active(), &mut active_late));
+    }
+
+    #[test]
+    fn remove_detaches_timer_from_queue() {
+        let mut queue = KTimerQueue::new();
+        let mut timers = [
+            KTimerEntity::new(8),
+            KTimerEntity::new(4),
+            KTimerEntity::new(12),
+        ];
+
+        for timer in &mut timers {
+            unsafe {
+                queue.insert(timer);
+            }
+        }
+
+        let removed = unsafe { queue.remove(&mut timers[1]) };
+
+        assert!(ptr::eq(removed, &mut timers[1]));
+        assert!(!timers[1].is_linked());
+        assert_eq!(queue.len(), 2);
+        assert_eq!(collect_deadlines(&queue), [8, 12]);
+    }
+
+    #[test]
+    fn pop_first_returns_timers_in_deadline_order() {
+        let mut queue = KTimerQueue::new();
+        let mut timers = [
+            KTimerEntity::new(40),
+            KTimerEntity::new(15),
+            KTimerEntity::new(25),
+            KTimerEntity::new(1),
+        ];
+
+        for timer in &mut timers {
+            unsafe {
+                queue.insert(timer);
+            }
+        }
+
+        let mut popped = Vec::new();
+        while let Some(timer) = unsafe { queue.pop_first() } {
+            popped.push(timer.deadline());
+            assert!(!timer.is_linked());
+        }
+
+        assert_eq!(popped, [1, 15, 25, 40]);
+        assert!(queue.is_empty());
+        assert_eq!(queue.len(), 0);
+        assert_eq!(queue.next_deadline(), None);
+        assert_eq!(queue.next_reload(), None);
     }
 }

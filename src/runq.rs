@@ -294,3 +294,142 @@ pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueErro
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thread::{CfsThread, ThreadState};
+    use crate::waitq::WaitEntity;
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_run_queue() {
+        unsafe {
+            init_cfs_rq();
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    fn cfs_thread(name: &'static str, priority: u32, vruntime: u64) -> CfsThread {
+        let mut thread = CfsThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 0,
+                name,
+                state: ThreadState::Ready,
+                is_cfs: true,
+            },
+            wait_entity: WaitEntity::new(),
+            sched_entity: SchedEntity::new(priority),
+        };
+        thread.sched_entity.vruntime = vruntime;
+        thread
+    }
+
+    fn collect_thread_names() -> Vec<&'static str> {
+        let mut names = Vec::new();
+        let mut cursor = unsafe { traverse_run_queue(None) };
+
+        while let Some(thread) = cursor {
+            unsafe {
+                names.push((*thread).name);
+                cursor = traverse_run_queue(Some(thread));
+            }
+        }
+
+        names
+    }
+
+    #[test]
+    fn sched_entities_order_by_vruntime() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_run_queue();
+        let mut first = cfs_thread("first", 1, 30);
+        let mut second = cfs_thread("second", 1, 10);
+        let mut third = cfs_thread("third", 1, 20);
+
+        unsafe {
+            (*CFS_RUN_QUEUE.get()).insert(&mut first.sched_entity);
+            (*CFS_RUN_QUEUE.get()).insert(&mut second.sched_entity);
+            (*CFS_RUN_QUEUE.get()).insert(&mut third.sched_entity);
+        }
+
+        let tree = unsafe { &*CFS_RUN_QUEUE.get() };
+        unsafe {
+            assert_eq!((*tree.first()).vruntime(), 10);
+            assert_eq!((*tree.last()).vruntime(), 30);
+        }
+    }
+
+    #[test]
+    fn enqueue_thread_updates_priority_sum_and_traversal_order() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_run_queue();
+        let mut first = cfs_thread("first", 2, 30);
+        let mut second = cfs_thread("second", 4, 10);
+        let mut third = cfs_thread("third", 8, 20);
+
+        unsafe {
+            enqueue_thread(&mut first.thread);
+            enqueue_thread(&mut second.thread);
+            enqueue_thread(&mut third.thread);
+        }
+
+        assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 14);
+        assert_eq!(collect_thread_names(), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn traverse_run_queue_includes_running_cfs_thread_first() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_run_queue();
+        let mut running = cfs_thread("running", 1, 0);
+        let mut queued = cfs_thread("queued", 1, 10);
+
+        unsafe {
+            CURRENT_THREAD_CTX = &mut running.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            enqueue_thread(&mut queued.thread);
+        }
+
+        assert_eq!(collect_thread_names(), ["running", "queued"]);
+    }
+
+    #[test]
+    fn dequeue_thread_removes_ready_thread_and_saturates_priority_sum() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_run_queue();
+        let mut first = cfs_thread("first", 3, 0);
+        let mut second = cfs_thread("second", 5, 10);
+
+        unsafe {
+            enqueue_thread(&mut first.thread);
+            enqueue_thread(&mut second.thread);
+            dequeue_thread(&mut first.thread);
+        }
+
+        assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 5);
+        assert_eq!(collect_thread_names(), ["second"]);
+        assert!(!first.sched_entity.is_linked());
+    }
+
+    #[test]
+    fn update_from_leftmost_aligns_detached_entity() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_run_queue();
+        let mut queued = cfs_thread("queued", 4, 40);
+        let mut detached = cfs_thread("detached", 2, 0);
+
+        unsafe {
+            enqueue_thread(&mut queued.thread);
+            update_from_leftmost(&mut detached.sched_entity);
+        }
+
+        assert_eq!(detached.sched_entity.vruntime(), 40);
+        assert_eq!(detached.sched_entity.sched_tick_cnt(), 80);
+    }
+}

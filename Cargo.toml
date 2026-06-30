@@ -7,7 +7,6 @@ license = "MIT"
 
 [lib]
 name = "rtsched"
-test = false
 bench = false
 
 [dependencies]
