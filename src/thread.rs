@@ -399,3 +399,134 @@ pub fn msleepyi(msec: u32) {
         request_context_switch();
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ktimer::KTimerEntity;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
+        CfsThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 1,
+                name,
+                state: ThreadState::Ready,
+                is_cfs: true,
+            },
+            wait_entity: WaitEntity::new(),
+            sched_entity: SchedEntity::new(priority),
+        }
+    }
+
+    fn rt_thread(name: &'static str) -> RtThread {
+        RtThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 2,
+                name,
+                state: ThreadState::Ready,
+                is_cfs: false,
+            },
+            wait_entity: WaitEntity::new(),
+            ktimer_entity: ptr::null_mut(),
+            runtime: 0,
+        }
+    }
+
+    #[test]
+    fn thread_ctx_exposes_cfs_sched_entity_only_for_cfs_threads() {
+        let mut cfs = cfs_thread("cfs", 3);
+        let rt = rt_thread("rt");
+
+        assert!(cfs.thread.sched_entity().is_some());
+        assert!(rt.thread.sched_entity().is_none());
+        assert_eq!(cfs.thread.sched_entity().unwrap().priority, 3);
+
+        unsafe {
+            let entity = cfs_sched_entity(&mut cfs.thread);
+            assert!(ptr::eq(
+                thread_from_cfs_sched_entity(entity),
+                &mut cfs.thread
+            ));
+        }
+    }
+
+    #[test]
+    fn wait_info_selects_wait_entity_by_thread_class() {
+        let mut cfs = cfs_thread("cfs", 1);
+        let mut rt = rt_thread("rt");
+
+        cfs.wait_entity.wait_ticks = 11;
+        cfs.wait_entity.waitevt = 7;
+        rt.wait_entity.wait_ticks = 13;
+        rt.wait_entity.waitevt = 9;
+
+        assert_eq!(cfs.thread.wait_info(), (11, 7));
+        assert_eq!(rt.thread.wait_info(), (13, 9));
+    }
+
+    #[test]
+    fn wait_entity_recovers_thread_context_for_both_thread_classes() {
+        let mut cfs = cfs_thread("cfs", 1);
+        let mut rt = rt_thread("rt");
+
+        unsafe {
+            assert!(ptr::eq(
+                thread_from_wait_entity(cfs_wait_entity(&mut cfs.thread)),
+                &mut cfs.thread
+            ));
+            assert!(ptr::eq(
+                thread_from_wait_entity(rt_wait_entity(&mut rt.thread)),
+                &mut rt.thread
+            ));
+        }
+    }
+
+    #[test]
+    fn rt_thread_helpers_access_runtime_and_ktimer_entity() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = KTimerEntity::new(10);
+
+        unsafe {
+            CURRENT_THREAD_CTX = &mut rt.thread;
+            CURRENT_THREAD_IS_CFS = false;
+
+            set_rt_ktimer_entity(&mut rt.thread, &mut ktimer);
+            assert!(ptr::eq(rt_ktimer_entity(&mut rt.thread), &mut ktimer));
+            assert!(ptr::eq(rt_thread_from_thread_ctx(&mut rt.thread), &mut rt));
+        }
+
+        assert!(set_rt_thread_start_time(42));
+        assert_eq!(rt.runtime, 42);
+
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    #[test]
+    fn set_rt_thread_start_time_ignores_cfs_current_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut cfs = cfs_thread("cfs", 1);
+
+        unsafe {
+            CURRENT_THREAD_CTX = &mut cfs.thread;
+            CURRENT_THREAD_IS_CFS = true;
+        }
+
+        assert!(!set_rt_thread_start_time(42));
+
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+}

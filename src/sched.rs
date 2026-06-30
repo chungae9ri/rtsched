@@ -149,3 +149,31 @@ pub fn handle_sched_tick() {
         request_context_switch();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn init_cfs_resets_run_queue_and_configures_cfs_timer() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        unsafe {
+            init_cfs(100, 25);
+        }
+
+        unsafe {
+            assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
+            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
+            let cfs = ptr::addr_of!(CFS_KTIMER);
+            let entity = ptr::addr_of!((*cfs).entity);
+            assert_eq!((*entity).duration(), 100);
+            assert_eq!((*entity).deadline(), 25);
+            assert_eq!((*cfs).execution_ticks(), 25);
+            assert!((*entity).is_active());
+        }
+    }
+}

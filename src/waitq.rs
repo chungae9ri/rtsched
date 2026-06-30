@@ -179,3 +179,140 @@ pub(crate) unsafe fn remove_wait_thread(thread: *mut ThreadCtx) {
         (*WAIT_QUEUE.get()).remove(wait_entity);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runq::SchedEntity;
+    use crate::thread::{CfsThread, ThreadState};
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_wait_queue() {
+        unsafe {
+            *WAIT_QUEUE.get() = RBTree::new();
+        }
+    }
+
+    fn cfs_thread(name: &'static str, wait_ticks: u32, waitevt: u32) -> CfsThread {
+        let mut thread = CfsThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 0,
+                name,
+                state: ThreadState::Waiting,
+                is_cfs: true,
+            },
+            wait_entity: WaitEntity::new(),
+            sched_entity: SchedEntity::new(1),
+        };
+        thread.wait_entity.wait_ticks = wait_ticks;
+        thread.wait_entity.waitevt = waitevt;
+        thread
+    }
+
+    fn collect_wait_ticks() -> Vec<u32> {
+        let mut ticks = Vec::new();
+        let tree = unsafe { &*WAIT_QUEUE.get() };
+        let mut entity = tree.first();
+
+        while !entity.is_null() {
+            unsafe {
+                ticks.push((*entity).wait_ticks);
+            }
+            entity = tree.next(entity);
+        }
+
+        ticks
+    }
+
+    #[test]
+    fn wait_entities_order_by_ticks_then_event() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_wait_queue();
+        let mut first = cfs_thread("first", 10, 2);
+        let mut second = cfs_thread("second", 5, 9);
+        let mut third = cfs_thread("third", 10, 1);
+
+        unsafe {
+            insert_wait_thread(&mut first.thread);
+            insert_wait_thread(&mut second.thread);
+            insert_wait_thread(&mut third.thread);
+        }
+
+        assert_eq!(collect_wait_ticks(), [5, 10, 10]);
+        let first_thread = unsafe { traverse_wait_queue(None).unwrap() };
+        let second_thread = unsafe { traverse_wait_queue(Some(first_thread)).unwrap() };
+        let third_thread = unsafe { traverse_wait_queue(Some(second_thread)).unwrap() };
+
+        unsafe {
+            assert_eq!((*first_thread).name, "second");
+            assert_eq!((*second_thread).name, "third");
+            assert_eq!((*third_thread).name, "first");
+            assert!(traverse_wait_queue(Some(third_thread)).is_none());
+        }
+    }
+
+    #[test]
+    fn advance_wait_queue_saturates_and_reorders() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_wait_queue();
+        let mut first = cfs_thread("first", 3, 0);
+        let mut second = cfs_thread("second", 12, 0);
+        let mut third = cfs_thread("third", 7, 0);
+
+        unsafe {
+            insert_wait_thread(&mut first.thread);
+            insert_wait_thread(&mut second.thread);
+            insert_wait_thread(&mut third.thread);
+            advance_wait_queue(5);
+        }
+
+        assert_eq!(first.wait_entity.wait_ticks, 0);
+        assert_eq!(second.wait_entity.wait_ticks, 7);
+        assert_eq!(third.wait_entity.wait_ticks, 2);
+        assert_eq!(collect_wait_ticks(), [0, 2, 7]);
+    }
+
+    #[test]
+    fn pop_expired_wait_thread_only_pops_zero_tick_threads() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_wait_queue();
+        let mut expired = cfs_thread("expired", 0, 0);
+        let mut pending = cfs_thread("pending", 4, 0);
+
+        unsafe {
+            insert_wait_thread(&mut pending.thread);
+            insert_wait_thread(&mut expired.thread);
+        }
+
+        let popped = unsafe { pop_expired_wait_thread() };
+        assert!(ptr::eq(popped, &mut expired.thread));
+        assert_eq!(unsafe { pop_expired_wait_thread() }, ptr::null_mut());
+        assert_eq!(collect_wait_ticks(), [4]);
+    }
+
+    #[test]
+    fn remove_wait_thread_detaches_entity() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_wait_queue();
+        let mut first = cfs_thread("first", 1, 0);
+        let mut second = cfs_thread("second", 2, 0);
+
+        unsafe {
+            insert_wait_thread(&mut first.thread);
+            insert_wait_thread(&mut second.thread);
+            remove_wait_thread(&mut first.thread);
+        }
+
+        assert_eq!(collect_wait_ticks(), [2]);
+        assert!(!first.wait_entity.rb_node.is_linked());
+    }
+}
