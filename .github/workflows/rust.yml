@@ -21,4 +21,4 @@ jobs:
     - name: Build
       run: cargo build --verbose --target ${{ env.CARGO_BUILD_TARGET }}
     - name: Run tests
-      run: cargo test --verbose --target ${{ env.CARGO_BUILD_TARGET }}
+      run: cargo test-host
