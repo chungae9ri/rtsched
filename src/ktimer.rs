@@ -18,8 +18,7 @@ use crate::thread::{
     ThreadCtx, ThreadState, rt_ktimer_entity, rt_thread_from_thread_ctx, set_rt_ktimer_entity,
 };
 use crate::waitq::{
-    WAIT_QUEUE, WaitQueueError, advance_wait_queue, insert_wait_thread, pop_expired_wait_thread,
-    remove_wait_thread,
+    WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
 };
 
 pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
@@ -291,13 +290,13 @@ pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
     }
 }
 
-unsafe fn update_wait_ktimer_deadline(now_ticks: u64, wait_ktimer_entity: *mut KTimerEntity) {
+unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
     unsafe {
         let wait_entity = (*WAIT_QUEUE.get()).first();
         if wait_entity.is_null() {
             (*wait_ktimer_entity).set_deadline_never();
         } else {
-            (*wait_ktimer_entity).set_deadline_after(now_ticks, (*wait_entity).wait_ticks);
+            (*wait_ktimer_entity).set_deadline_at((*wait_entity).wake_at);
         }
         (*wait_ktimer_entity).set_active(false);
     }
@@ -310,25 +309,16 @@ pub(crate) unsafe fn program_wait_ktimer() {
         let wait_ktimer_entity = (*wait_ktimer).entity_mut();
 
         queue.remove(wait_ktimer_entity);
-        update_wait_ktimer_deadline(queue.now_ticks(), wait_ktimer_entity);
+        update_wait_ktimer_deadline(wait_ktimer_entity);
         queue.insert(wait_ktimer_entity);
         refresh_next_ktimer(queue);
-    });
-}
-
-pub(crate) fn update_wait_thread_ticks(elapsed: u32) {
-    interrupt::free(|_| unsafe {
-        let wait_ktimer_entity = ptr::addr_of_mut!(WAIT_KTIMER.entity);
-        if (*wait_ktimer_entity).deadline_at() != KTIMER_DEADLINE_NEVER {
-            advance_wait_queue(elapsed);
-        }
     });
 }
 
 pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
     unsafe {
         loop {
-            let wait_thread = pop_expired_wait_thread();
+            let wait_thread = pop_expired_wait_thread(queue.now_ticks());
             if wait_thread.is_null() {
                 break;
             }
@@ -553,6 +543,18 @@ pub fn is_active_ktimer(name: &str) -> bool {
 
 pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     interrupt::free(|_| unsafe { NEXT_KTIMER })
+}
+
+pub(crate) fn ktimer_now_ticks() -> u64 {
+    #[cfg(target_arch = "arm")]
+    {
+        interrupt::free(|_| unsafe { (*KTIMER_QUEUE.get()).now_ticks() })
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    {
+        unsafe { (*KTIMER_QUEUE.get()).now_ticks() }
+    }
 }
 
 pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
@@ -786,7 +788,7 @@ impl KTimerQueue {
 
                 if is_wait_ktimer(expired) {
                     wake_wait_thread(self, elapsed);
-                    update_wait_ktimer_deadline(self.now_ticks, expired);
+                    update_wait_ktimer_deadline(expired);
                     self.insert(expired);
                 } else if is_cfs_ktimer(expired) {
                     if (*expired).is_active() {
