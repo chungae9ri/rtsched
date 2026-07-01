@@ -12,8 +12,8 @@ use crate::arch::ctx_swtich::request_context_switch;
 use crate::clock::ticks_per_ms;
 use crate::ktimer::{
     CFS_KTIMER, KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq,
-    elapsed_ticks_since_current_reload, enqueue_ktimer, update_next_ktimer,
-    update_wait_thread_ticks, yield_ktimer,
+    elapsed_ticks_since_current_reload, enqueue_ktimer, ktimer_now_ticks, update_next_ktimer,
+    yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
@@ -84,7 +84,10 @@ impl ThreadCtx {
                 rt_wait_entity(thread)
             };
 
-            ((*entity).wait_ticks, (*entity).waitevt)
+            (
+                (*entity).remaining_at(ktimer_now_ticks()),
+                (*entity).waitevt,
+            )
         }
     }
 }
@@ -364,7 +367,6 @@ pub fn yieldyi() {
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
         update_next_ktimer(next_ktimer);
-        update_wait_thread_ticks(elapsed);
 
         request_context_switch();
     });
@@ -380,14 +382,13 @@ pub fn msleepyi(msec: u32) {
         };
 
         let _ = yield_ktimer(current_ktimer, elapsed, false);
-        update_wait_thread_ticks(elapsed);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
             cfs_wait_entity(CURRENT_THREAD_CTX)
         } else {
             rt_wait_entity(CURRENT_THREAD_CTX)
         };
-        (*wait_entity).wait_ticks = msec.saturating_mul(ticks_per_ms());
+        (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
         (*wait_entity).waitevt = 0;
 
         if CURRENT_THREAD_IS_CFS {
@@ -462,9 +463,9 @@ mod tests {
         let mut cfs = cfs_thread("cfs", 1);
         let mut rt = rt_thread("rt");
 
-        cfs.wait_entity.wait_ticks = 11;
+        cfs.wait_entity.set_wake_after(0, 11);
         cfs.wait_entity.waitevt = 7;
-        rt.wait_entity.wait_ticks = 13;
+        rt.wait_entity.set_wake_after(0, 13);
         rt.wait_entity.waitevt = 9;
 
         assert_eq!(cfs.thread.wait_info(), (11, 7));
