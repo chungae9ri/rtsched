@@ -5,8 +5,7 @@ use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
-use cortex_m::interrupt;
-
+use crate::critical_section;
 use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
@@ -274,7 +273,7 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
 }
 
 pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
-    interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         if thread.is_null() {
             return Err(WaitQueueError::NotFound);
         }

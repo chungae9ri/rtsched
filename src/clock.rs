@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
+use crate::critical_section;
+
 static mut SYS_CLK_FREQ: u32 = 0;
 
 pub fn sys_clk_freq() -> u32 {
@@ -8,15 +10,9 @@ pub fn sys_clk_freq() -> u32 {
 }
 
 pub fn update_sys_clk_freq(freq: u32) {
-    #[cfg(target_arch = "arm")]
-    cortex_m::interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         core::ptr::write_volatile(&raw mut SYS_CLK_FREQ, freq);
     });
-
-    #[cfg(not(target_arch = "arm"))]
-    unsafe {
-        core::ptr::write_volatile(&raw mut SYS_CLK_FREQ, freq);
-    }
 }
 
 pub fn ticks_per_ms() -> u32 {
