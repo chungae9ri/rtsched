@@ -4,6 +4,7 @@
 use cortex_m::peripheral::{DCB, DWT};
 
 use crate::clock::ticks_per_ms;
+use crate::critical_section;
 
 static mut DWT_ELAPSE_START_CYCLE: u32 = 0;
 
@@ -26,7 +27,7 @@ fn msec_from_cycles(cycles: u32) -> u32 {
 /// Returns `false` when the Cortex-M implementation does not provide a DWT
 /// cycle counter or when enabling it did not take effect.
 pub fn init_dwt_cycle_counter(dcb: &mut DCB, dwt: &mut DWT) -> bool {
-    cortex_m::interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         if !DWT::has_cycle_counter() {
             return false;
         }
@@ -50,7 +51,7 @@ pub fn dwt_cycle_count() -> u32 {
 
 /// Reset the baseline used by `get_elapse_cycles` and `get_elapse_msec`.
 pub fn reset_elapse_counter() {
-    cortex_m::interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         core::ptr::write_volatile(&raw mut DWT_ELAPSE_START_CYCLE, DWT::cycle_count());
     });
 }

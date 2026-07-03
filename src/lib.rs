@@ -4,6 +4,16 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(target_arch = "arm")]
+pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
+    cortex_m::interrupt::free(|_| f())
+}
+
+#[cfg(not(target_arch = "arm"))]
+pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
+    f()
+}
+
+#[cfg(target_arch = "arm")]
 mod arch;
 #[cfg(not(target_arch = "arm"))]
 mod arch {

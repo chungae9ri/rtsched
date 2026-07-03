@@ -6,10 +6,9 @@
 use core::mem::offset_of;
 use core::ptr;
 
-use cortex_m::interrupt;
-
 use crate::arch::ctx_swtich::request_context_switch;
 use crate::clock::ticks_per_ms;
+use crate::critical_section;
 use crate::ktimer::{
     CFS_KTIMER, KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq,
     elapsed_ticks_since_current_reload, enqueue_ktimer, ktimer_now_ticks, update_next_ktimer,
@@ -341,7 +340,7 @@ pub fn set_rt_thread_start_time(start_time: u32) -> bool {
 }
 
 pub fn current_rt_thread_runtime() -> Option<u32> {
-    interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
             None
         } else {
@@ -357,7 +356,7 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
 /// This is intended for the threads that have completed their current
 /// job and want to give a chance to next scheduled thread.
 pub fn yieldyi() {
-    interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         let elapsed: u32 = elapsed_ticks_since_current_reload();
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
@@ -373,7 +372,7 @@ pub fn yieldyi() {
 }
 
 pub fn msleepyi(msec: u32) {
-    interrupt::free(|_| unsafe {
+    critical_section(|| unsafe {
         let elapsed = elapsed_ticks_since_current_reload();
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
