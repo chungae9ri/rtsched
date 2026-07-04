@@ -111,7 +111,15 @@ pub struct RtThread {
     pub thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
     pub wait_entity: WaitEntity,
-    ktimer_entity: *mut KTimerEntity,
+    /// KTimer entity used for KTimerQueue ordering.
+    pub ktimer_entity: *mut KTimerEntity,
+    /// Elapsed tick counter for the RT thread's current period/job window.
+    ///
+    /// This is not only CPU execution time: it also includes time spent waiting
+    /// after the thread yields into the wait queue, so RT deadlines continue to
+    /// advance while the thread is sleeping. The counter is charged when the RT
+    /// thread yields or is preempted, and also when it wakes from the wait queue.
+    /// It is reset when the RT thread starts a new period.
     pub runtime: u32,
 }
 
