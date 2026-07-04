@@ -167,8 +167,13 @@ pub(crate) unsafe fn pop_expired_wait_thread(now_ticks: u64) -> *mut ThreadCtx {
 pub(crate) unsafe fn insert_wait_thread(thread: *mut ThreadCtx) {
     unsafe {
         let wait_entity = wait_entity(thread);
+        let tree = &mut *WAIT_QUEUE.get();
+        debug_assert!(
+            !tree.contains(wait_entity.cast_const()),
+            "wait entity is already queued"
+        );
         (*wait_entity).reset_links();
-        (*WAIT_QUEUE.get()).insert(wait_entity);
+        tree.insert(wait_entity);
     }
 }
 

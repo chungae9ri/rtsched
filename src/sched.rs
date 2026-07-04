@@ -161,7 +161,7 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ktimer::RtKTimer;
+    use crate::ktimer::{RtKTimer, init_ktimer_queue};
     use crate::thread::{CfsThread, RtThread};
     use crate::waitq::WaitEntity;
     use std::sync::Mutex;
@@ -225,11 +225,21 @@ mod tests {
         }
     }
 
+    unsafe fn running_thread_count(threads: &[*const ThreadCtx]) -> usize {
+        threads
+            .iter()
+            .filter(|&&thread| {
+                !thread.is_null() && unsafe { (*thread).state == ThreadState::Running }
+            })
+            .count()
+    }
+
     #[test]
     fn init_cfs_resets_run_queue_and_configures_cfs_timer() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         unsafe {
+            init_ktimer_queue();
             init_cfs(100, 25);
         }
 
@@ -287,6 +297,10 @@ mod tests {
         assert_eq!(current.sched_entity.vruntime(), 15);
         assert!(current.thread.state == ThreadState::Ready);
         assert!(queued.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &queued.thread]) },
+            1
+        );
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &mut queued.thread));
             assert!(CURRENT_THREAD_IS_CFS);
@@ -317,6 +331,10 @@ mod tests {
         assert_eq!(current.sched_entity.vruntime(), 1);
         assert!(current.thread.state == ThreadState::Running);
         assert!(queued.thread.state == ThreadState::Ready);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &queued.thread]) },
+            1
+        );
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &mut current.thread));
             assert!(CURRENT_THREAD_IS_CFS);
@@ -348,6 +366,10 @@ mod tests {
 
         assert!(rt.thread.state == ThreadState::Ready);
         assert!(second.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&rt.thread, &first.thread, &second.thread]) },
+            1
+        );
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &mut second.thread));
             assert!(CURRENT_THREAD_IS_CFS);
@@ -378,6 +400,10 @@ mod tests {
 
         assert!(current.thread.state == ThreadState::Ready);
         assert!(rt.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &rt.thread]) },
+            1
+        );
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &mut rt.thread));
             assert!(!CURRENT_THREAD_IS_CFS);
