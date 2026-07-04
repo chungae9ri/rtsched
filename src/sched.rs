@@ -39,6 +39,17 @@ extern "C" fn schedule() {
             return;
         }
 
+        schedule_next(next_ktimer, elapsed_ticks_since_last_interrupt());
+        program_next_systick();
+    }
+}
+
+unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
+    unsafe {
+        if next_ktimer.is_null() {
+            return;
+        }
+
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
         //   ticks and its priority.
@@ -50,10 +61,10 @@ extern "C" fn schedule() {
         // - If the next expired ktimer is for an RT thread and current thread is
         //   CFS thread, insert current to CFS runq and switch to next RT thread.
         // - If the next expired ktimer is for an RT thread and current thread is
-        //   RT thread,preempt the CURRENT_THREAD_CTX with next RT thread.
+        //   RT thread, preempt the CURRENT_THREAD_CTX with next RT thread.
         if CURRENT_THREAD_IS_CFS && (*CURRENT_THREAD_CTX).state == ThreadState::Running {
             let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
-            let sched_tick_added = u64::from(elapsed_ticks_since_last_interrupt());
+            let sched_tick_added = u64::from(elapsed);
             let priority_sum = *CFS_RUN_QUEUE.priority_sum();
             if priority_sum == 0 {
                 return;
@@ -116,8 +127,6 @@ extern "C" fn schedule() {
             CURRENT_THREAD_CTX = next_thread;
             CURRENT_THREAD_IS_CFS = false;
         }
-
-        program_next_systick();
     }
 }
 
@@ -152,15 +161,85 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ktimer::{RtKTimer, init_ktimer_queue};
+    use crate::thread::{CfsThread, RtThread};
+    use crate::waitq::WaitEntity;
     use std::sync::Mutex;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn cfs_thread(
+        name: &'static str,
+        priority: u32,
+        vruntime: u64,
+        state: ThreadState,
+    ) -> CfsThread {
+        let mut thread = CfsThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 1,
+                name,
+                state,
+                is_cfs: true,
+            },
+            wait_entity: WaitEntity::new(),
+            sched_entity: SchedEntity::new(priority),
+        };
+        thread.sched_entity.vruntime = vruntime;
+        thread
+    }
+
+    fn rt_thread(name: &'static str) -> RtThread {
+        RtThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 2,
+                name,
+                state: ThreadState::Running,
+                is_cfs: false,
+            },
+            wait_entity: WaitEntity::new(),
+            ktimer_entity: ptr::null_mut(),
+            runtime: 0,
+        }
+    }
+
+    unsafe fn reset_sched_state() -> *mut KTimerEntity {
+        unsafe {
+            init_cfs_rq();
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+            CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
+            (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut()
+        }
+    }
+
+    unsafe fn queue_cfs_thread(thread: *mut ThreadCtx) {
+        unsafe {
+            let entity = cfs_sched_entity(thread);
+            (*entity).reset_links();
+            (*CFS_RUN_QUEUE.get()).insert(entity);
+            *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
+        }
+    }
+
+    unsafe fn running_thread_count(threads: &[*const ThreadCtx]) -> usize {
+        threads
+            .iter()
+            .filter(|&&thread| {
+                !thread.is_null() && unsafe { (*thread).state == ThreadState::Running }
+            })
+            .count()
+    }
 
     #[test]
     fn init_cfs_resets_run_queue_and_configures_cfs_timer() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         unsafe {
+            init_ktimer_queue();
             init_cfs(100, 25);
         }
 
@@ -173,6 +252,165 @@ mod tests {
             assert_eq!((*entity).deadline(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
             assert!((*entity).is_active());
+        }
+    }
+
+    #[test]
+    fn cfs_accounting_updates_vruntime_and_sched_ticks() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut current = cfs_thread("current", 1, 0, ThreadState::Running);
+        let mut queued = cfs_thread("queued", 3, 100, ThreadState::Ready);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            queue_cfs_thread(&mut queued.thread);
+            *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
+
+            schedule_next(cfs_ktimer, 12);
+        }
+
+        assert_eq!(current.sched_entity.sched_tick_cnt(), 12);
+        assert_eq!(current.sched_entity.vruntime(), 3);
+        assert!(current.thread.state == ThreadState::Running);
+    }
+
+    #[test]
+    fn cfs_preempts_current_when_queued_thread_has_lower_vruntime() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut current = cfs_thread("current", 2, 10, ThreadState::Running);
+        let mut queued = cfs_thread("queued", 2, 5, ThreadState::Ready);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            queue_cfs_thread(&mut queued.thread);
+            *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
+
+            schedule_next(cfs_ktimer, 10);
+        }
+
+        assert_eq!(current.sched_entity.vruntime(), 15);
+        assert!(current.thread.state == ThreadState::Ready);
+        assert!(queued.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &queued.thread]) },
+            1
+        );
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut queued.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut current.sched_entity
+            ));
+        }
+    }
+
+    #[test]
+    fn cfs_keeps_current_when_it_still_has_lower_vruntime() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut current = cfs_thread("current", 2, 0, ThreadState::Running);
+        let mut queued = cfs_thread("queued", 2, 10, ThreadState::Ready);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            queue_cfs_thread(&mut queued.thread);
+            *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
+
+            schedule_next(cfs_ktimer, 2);
+        }
+
+        assert_eq!(current.sched_entity.vruntime(), 1);
+        assert!(current.thread.state == ThreadState::Running);
+        assert!(queued.thread.state == ThreadState::Ready);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &queued.thread]) },
+            1
+        );
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut current.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut queued.sched_entity
+            ));
+            assert!(!current.sched_entity.is_linked());
+        }
+    }
+
+    #[test]
+    fn cfs_timer_switches_from_rt_thread_to_leftmost_cfs_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut rt = rt_thread("rt");
+        let mut first = cfs_thread("first", 1, 30, ThreadState::Ready);
+        let mut second = cfs_thread("second", 1, 10, ThreadState::Ready);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            CURRENT_THREAD_CTX = &mut rt.thread;
+            CURRENT_THREAD_IS_CFS = false;
+            queue_cfs_thread(&mut first.thread);
+            queue_cfs_thread(&mut second.thread);
+
+            schedule_next(cfs_ktimer, 0);
+        }
+
+        assert!(rt.thread.state == ThreadState::Ready);
+        assert!(second.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&rt.thread, &first.thread, &second.thread]) },
+            1
+        );
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut second.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut first.sched_entity
+            ));
+        }
+    }
+
+    #[test]
+    fn rt_timer_switches_from_cfs_thread_to_rt_thread_and_requeues_cfs() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut current = cfs_thread("cfs", 2, 4, ThreadState::Running);
+        let mut rt = rt_thread("rt");
+        let mut rt_ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
+
+        unsafe {
+            let _ = reset_sched_state();
+            rt_ktimer.init_rt_ktimer(&mut rt.thread);
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
+
+            schedule_next(rt_ktimer.entity_mut(), 0);
+        }
+
+        assert!(current.thread.state == ThreadState::Ready);
+        assert!(rt.thread.state == ThreadState::Running);
+        assert_eq!(
+            unsafe { running_thread_count(&[&current.thread, &rt.thread]) },
+            1
+        );
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut rt.thread));
+            assert!(!CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut current.sched_entity
+            ));
         }
     }
 }

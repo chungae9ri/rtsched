@@ -5,6 +5,7 @@ use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
+use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{ThreadCtx, cfs_wait_entity, rt_wait_entity, thread_from_wait_entity};
 
@@ -138,6 +139,20 @@ pub unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut
     }
 }
 
+/// Visit waiting threads without exposing raw traversal cursors.
+pub fn traverse_wait_queue_fn<F>(mut f: F)
+where
+    F: FnMut(&ThreadCtx),
+{
+    critical_section(|| unsafe {
+        let mut cursor = traverse_wait_queue(None);
+        while let Some(thread) = cursor {
+            f(&*thread);
+            cursor = traverse_wait_queue(Some(thread));
+        }
+    });
+}
+
 pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
     unsafe {
         if (*thread).is_cfs {
@@ -167,8 +182,13 @@ pub(crate) unsafe fn pop_expired_wait_thread(now_ticks: u64) -> *mut ThreadCtx {
 pub(crate) unsafe fn insert_wait_thread(thread: *mut ThreadCtx) {
     unsafe {
         let wait_entity = wait_entity(thread);
+        let tree = &mut *WAIT_QUEUE.get();
+        debug_assert!(
+            !tree.contains(wait_entity.cast_const()),
+            "wait entity is already queued"
+        );
         (*wait_entity).reset_links();
-        (*WAIT_QUEUE.get()).insert(wait_entity);
+        tree.insert(wait_entity);
     }
 }
 
@@ -259,6 +279,9 @@ mod tests {
         }
 
         assert_eq!(collect_wake_at(), [5, 10, 10]);
+        let mut names = Vec::new();
+        traverse_wait_queue_fn(|thread| names.push(thread.name));
+        assert_eq!(names, ["second", "third", "first"]);
         let first_thread = unsafe { traverse_wait_queue(None).unwrap() };
         let second_thread = unsafe { traverse_wait_queue(Some(first_thread)).unwrap() };
         let third_thread = unsafe { traverse_wait_queue(Some(second_thread)).unwrap() };

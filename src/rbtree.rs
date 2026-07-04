@@ -139,6 +139,19 @@ impl<T: RBTreeNode> RBTree<T> {
         }
     }
 
+    pub fn contains(&self, entity: *const T) -> bool {
+        let mut current = self.first();
+
+        while !current.is_null() {
+            if ptr::eq(current.cast_const(), entity) {
+                return true;
+            }
+            current = self.next(current);
+        }
+
+        false
+    }
+
     /// Insert a detached entity into the tree.
     ///
     /// # Safety
@@ -147,6 +160,10 @@ impl<T: RBTreeNode> RBTree<T> {
     /// simultaneously linked into another tree.
     pub unsafe fn insert(&mut self, entity: *mut T) {
         debug_assert!(!entity.is_null());
+        debug_assert!(
+            !self.contains(entity.cast_const()),
+            "entity is already linked into this tree"
+        );
 
         unsafe {
             let node = T::node(entity);
@@ -684,6 +701,37 @@ mod tests {
         unsafe {
             assert_eq!((*tree.first()).key, 1);
             assert_eq!((*tree.last()).key, 9);
+        }
+    }
+
+    #[test]
+    fn contains_reports_tree_membership_including_root() {
+        let mut tree = RBTree::<TestEntity>::new();
+        let mut root = TestEntity::new(10);
+        let mut child = TestEntity::new(5);
+        let detached = TestEntity::new(7);
+
+        unsafe {
+            tree.insert(&mut root);
+            assert!(tree.contains(&root));
+            assert!(!tree.contains(&child));
+
+            tree.insert(&mut child);
+            assert!(tree.contains(&root));
+            assert!(tree.contains(&child));
+            assert!(!tree.contains(&detached));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "entity is already linked into this tree")]
+    fn inserting_same_entity_twice_panics_in_debug_builds() {
+        let mut tree = RBTree::<TestEntity>::new();
+        let mut entity = TestEntity::new(10);
+
+        unsafe {
+            tree.insert(&mut entity);
+            tree.insert(&mut entity);
         }
     }
 

@@ -5,6 +5,7 @@
 
 use core::mem::offset_of;
 use core::ptr;
+use core::ptr::NonNull;
 
 use crate::arch::ctx_swtich::request_context_switch;
 use crate::clock::ticks_per_ms;
@@ -103,6 +104,32 @@ pub struct CfsThread {
     pub sched_entity: SchedEntity,
 }
 
+impl CfsThread {
+    pub fn thread_ctx(&self) -> &ThreadCtx {
+        &self.thread
+    }
+
+    pub fn thread_ctx_mut(&mut self) -> &mut ThreadCtx {
+        &mut self.thread
+    }
+
+    pub fn wait_entity(&self) -> &WaitEntity {
+        &self.wait_entity
+    }
+
+    pub fn wait_entity_mut(&mut self) -> &mut WaitEntity {
+        &mut self.wait_entity
+    }
+
+    pub fn sched_entity(&self) -> &SchedEntity {
+        &self.sched_entity
+    }
+
+    pub fn sched_entity_mut(&mut self) -> &mut SchedEntity {
+        &mut self.sched_entity
+    }
+}
+
 /// Thread control block for RT-scheduled threads.
 #[repr(C)]
 pub struct RtThread {
@@ -111,8 +138,38 @@ pub struct RtThread {
     pub thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
     pub wait_entity: WaitEntity,
-    ktimer_entity: *mut KTimerEntity,
+    /// KTimer entity used for KTimerQueue ordering.
+    pub ktimer_entity: *mut KTimerEntity,
+    /// Elapsed tick counter for the RT thread's current period/job window.
+    ///
+    /// This is not only CPU execution time: it also includes time spent waiting
+    /// after the thread yields into the wait queue, so RT deadlines continue to
+    /// advance while the thread is sleeping. The counter is charged when the RT
+    /// thread yields or is preempted, and also when it wakes from the wait queue.
+    /// It is reset when the RT thread starts a new period.
     pub runtime: u32,
+}
+
+impl RtThread {
+    pub fn thread_ctx(&self) -> &ThreadCtx {
+        &self.thread
+    }
+
+    pub fn thread_ctx_mut(&mut self) -> &mut ThreadCtx {
+        &mut self.thread
+    }
+
+    pub fn wait_entity(&self) -> &WaitEntity {
+        &self.wait_entity
+    }
+
+    pub fn wait_entity_mut(&mut self) -> &mut WaitEntity {
+        &mut self.wait_entity
+    }
+
+    pub fn ktimer_entity(&self) -> Option<NonNull<KTimerEntity>> {
+        NonNull::new(self.ktimer_entity)
+    }
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -444,6 +501,9 @@ mod tests {
         let mut cfs = cfs_thread("cfs", 3);
         let rt = rt_thread("rt");
 
+        assert!(ptr::eq(cfs.thread_ctx(), &cfs.thread));
+        assert!(ptr::eq(cfs.wait_entity(), &cfs.wait_entity));
+        assert!(ptr::eq(cfs.sched_entity(), &cfs.sched_entity));
         assert!(cfs.thread.sched_entity().is_some());
         assert!(rt.thread.sched_entity().is_none());
         assert_eq!(cfs.thread.sched_entity().unwrap().priority, 3);
@@ -494,6 +554,10 @@ mod tests {
         let mut rt = rt_thread("rt");
         let mut ktimer = KTimerEntity::new(10);
 
+        assert!(ptr::eq(rt.thread_ctx(), &rt.thread));
+        assert!(ptr::eq(rt.wait_entity(), &rt.wait_entity));
+        assert!(rt.ktimer_entity().is_none());
+
         unsafe {
             CURRENT_THREAD_CTX = &mut rt.thread;
             CURRENT_THREAD_IS_CFS = false;
@@ -503,6 +567,7 @@ mod tests {
             assert!(ptr::eq(rt_thread_from_thread_ctx(&mut rt.thread), &mut rt));
         }
 
+        assert!(ptr::eq(rt.ktimer_entity().unwrap().as_ptr(), &mut ktimer));
         assert!(set_rt_thread_start_time(42));
         assert_eq!(rt.runtime, 42);
 

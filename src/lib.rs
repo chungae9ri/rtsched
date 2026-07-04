@@ -8,7 +8,53 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
     cortex_m::interrupt::free(|_| f())
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(all(not(target_arch = "arm"), test))]
+thread_local! {
+    static HOST_CRITICAL_SECTION_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(all(not(target_arch = "arm"), test))]
+static HOST_CRITICAL_SECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(not(target_arch = "arm"), test))]
+struct HostCriticalSectionDepth;
+
+#[cfg(all(not(target_arch = "arm"), test))]
+impl Drop for HostCriticalSectionDepth {
+    fn drop(&mut self) {
+        HOST_CRITICAL_SECTION_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+/// Run `f` while scheduler globals are protected from interrupt or test-thread
+/// interleaving.
+///
+/// On Cortex-M this delegates to `cortex_m::interrupt::free`, which is nest-safe
+/// because it restores interrupts only when they were active before entry. Host
+/// tests use a reentrant mutex-backed critical section so nested scheduler calls
+/// do not deadlock and parallel tests still serialize global state access.
+#[cfg(all(not(target_arch = "arm"), test))]
+pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
+    let nested = HOST_CRITICAL_SECTION_DEPTH.with(|depth| {
+        let current = depth.get();
+        depth.set(current + 1);
+        current > 0
+    });
+    let _depth = HostCriticalSectionDepth;
+
+    if nested {
+        f()
+    } else {
+        let _lock = HOST_CRITICAL_SECTION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f()
+    }
+}
+
+#[cfg(all(not(target_arch = "arm"), not(test)))]
 pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
@@ -81,13 +127,61 @@ pub use arch::timer_cm::{
 };
 
 pub use ktimer::{
-    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
-    enqueue_ktimerq_from_waitq, init_ktimer_queue, is_active_ktimer, next_ktimer_reload,
-    traverse_ktimer_queue, traverse_ktimer_queue_fn,
+    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, dequeue_rt_thread_to_waitq,
+    enqueue_ktimer, enqueue_ktimerq_from_waitq, enqueue_rt_thread_from_waitq, init_ktimer_queue,
+    is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue, traverse_ktimer_queue_fn,
 };
 
-pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};
+pub use runq::{
+    dequeue_cfs_thread_to_waitq, dequeue_runq_to_waitq, traverse_run_queue, traverse_run_queue_fn,
+};
 
 pub use sched::{handle_sched_tick, init_cfs};
 
-pub use waitq::{WaitQueueError, traverse_wait_queue};
+pub use waitq::{WaitQueueError, traverse_wait_queue, traverse_wait_queue_fn};
+
+#[cfg(all(test, not(target_arch = "arm")))]
+mod tests {
+    use super::critical_section;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+
+    #[test]
+    fn host_critical_section_allows_nested_calls() {
+        let value = critical_section(|| critical_section(|| 42));
+
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn host_critical_section_serializes_parallel_threads() {
+        let in_section = Arc::new(AtomicBool::new(false));
+        let overlap_count = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+
+        for _ in 0..8 {
+            let in_section = Arc::clone(&in_section);
+            let overlap_count = Arc::clone(&overlap_count);
+
+            threads.push(thread::spawn(move || {
+                for _ in 0..128 {
+                    critical_section(|| {
+                        if in_section.swap(true, Ordering::SeqCst) {
+                            overlap_count.fetch_add(1, Ordering::SeqCst);
+                        }
+
+                        thread::yield_now();
+                        in_section.store(false, Ordering::SeqCst);
+                    });
+                }
+            }));
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(overlap_count.load(Ordering::SeqCst), 0);
+    }
+}

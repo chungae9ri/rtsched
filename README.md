@@ -45,6 +45,9 @@ the timer is marked `inactive`.
 `deadline_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
 dispatch expiry in `SysTick` interrupt handler, `yieldyi`, wait timer programming in `msleepyi`.
 
+When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
+`runtime`, `deadline_at`.
+
 `RbNode` is the entry to the `KTimer` rbtree.
 
 `active` timers are eligible for scheduler selection; inactive timers remain in the tree but are skipped by
