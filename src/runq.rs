@@ -9,7 +9,9 @@ use crate::critical_section;
 use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
-use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
+use crate::thread::{
+    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+};
 use crate::waitq::{WaitQueueError, insert_wait_thread};
 
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
@@ -185,6 +187,20 @@ pub unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut 
     }
 }
 
+/// Visit scheduler-visible CFS threads without exposing raw traversal cursors.
+pub fn traverse_run_queue_fn<F>(mut f: F)
+where
+    F: FnMut(&ThreadCtx),
+{
+    critical_section(|| unsafe {
+        let mut cursor = traverse_run_queue(None);
+        while let Some(thread) = cursor {
+            f(&*thread);
+            cursor = traverse_run_queue(Some(thread));
+        }
+    });
+}
+
 /// Reset the scheduler run queue to an empty state.
 pub(crate) unsafe fn init_cfs_rq() {
     unsafe {
@@ -303,6 +319,10 @@ pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueErro
     })
 }
 
+pub fn dequeue_cfs_thread_to_waitq(thread: &mut CfsThread) -> Result<(), WaitQueueError> {
+    dequeue_runq_to_waitq(thread.thread_ctx_mut())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,14 +367,7 @@ mod tests {
 
     fn collect_thread_names() -> Vec<&'static str> {
         let mut names = Vec::new();
-        let mut cursor = unsafe { traverse_run_queue(None) };
-
-        while let Some(thread) = cursor {
-            unsafe {
-                names.push((*thread).name);
-                cursor = traverse_run_queue(Some(thread));
-            }
-        }
+        traverse_run_queue_fn(|thread| names.push(thread.name));
 
         names
     }
@@ -448,7 +461,7 @@ mod tests {
             enqueue_thread(&mut thread.thread);
             assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(&mut thread.thread)));
 
-            assert!(dequeue_runq_to_waitq(&mut thread.thread).is_ok());
+            assert!(dequeue_cfs_thread_to_waitq(&mut thread).is_ok());
 
             assert!(thread.thread.state == ThreadState::Waiting);
             assert!(!(*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(&mut thread.thread)));

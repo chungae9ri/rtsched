@@ -127,16 +127,18 @@ pub use arch::timer_cm::{
 };
 
 pub use ktimer::{
-    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, enqueue_ktimer,
-    enqueue_ktimerq_from_waitq, init_ktimer_queue, is_active_ktimer, next_ktimer_reload,
-    traverse_ktimer_queue, traverse_ktimer_queue_fn,
+    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, dequeue_rt_thread_to_waitq,
+    enqueue_ktimer, enqueue_ktimerq_from_waitq, enqueue_rt_thread_from_waitq, init_ktimer_queue,
+    is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue, traverse_ktimer_queue_fn,
 };
 
-pub use runq::{dequeue_runq_to_waitq, traverse_run_queue};
+pub use runq::{
+    dequeue_cfs_thread_to_waitq, dequeue_runq_to_waitq, traverse_run_queue, traverse_run_queue_fn,
+};
 
 pub use sched::{handle_sched_tick, init_cfs};
 
-pub use waitq::{WaitQueueError, traverse_wait_queue};
+pub use waitq::{WaitQueueError, traverse_wait_queue, traverse_wait_queue_fn};
 
 #[cfg(all(test, not(target_arch = "arm")))]
 mod tests {

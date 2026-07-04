@@ -16,7 +16,8 @@ use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
 use crate::thread::{
-    ThreadCtx, ThreadState, rt_ktimer_entity, rt_thread_from_thread_ctx, set_rt_ktimer_entity,
+    RtThread, ThreadCtx, ThreadState, rt_ktimer_entity, rt_thread_from_thread_ctx,
+    set_rt_ktimer_entity,
 };
 use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
@@ -253,6 +254,10 @@ impl RtKTimer {
             }
         }
     }
+
+    pub fn init_rt_thread(&mut self, thread: &mut RtThread) {
+        self.init_rt_ktimer(thread.thread_ctx_mut());
+    }
 }
 
 /// Convert a raw tick interval into a SysTick reload register value.
@@ -429,6 +434,10 @@ pub fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueE
     })
 }
 
+pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
+    dequeue_ktimerq_to_waitq(thread.thread_ctx_mut())
+}
+
 pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         if thread.is_null() || (*thread).is_cfs {
@@ -448,6 +457,10 @@ pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueu
 
         Ok(())
     })
+}
+
+pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
+    enqueue_ktimerq_from_waitq(thread.thread_ctx_mut())
 }
 
 pub fn next_ktimer_deadline() -> Option<u32> {
@@ -1234,19 +1247,35 @@ mod tests {
         reset_wait_queue();
         let mut rt = rt_thread("rt");
         let mut ktimer = RtKTimer::new(100, ptr::null_mut(), "rt");
+        rt.wait_entity.set_wake_after(0, 10);
 
         unsafe {
             init_ktimer_queue();
-            ktimer.init_rt_ktimer(&mut rt.thread);
+            crate::sched::init_cfs(1_000, 25);
+            ktimer.init_rt_thread(&mut rt);
             enqueue_ktimer(ktimer.entity_mut());
 
             assert!((*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
 
-            assert!(dequeue_ktimerq_to_waitq(&mut rt.thread).is_ok());
+            assert!(dequeue_rt_thread_to_waitq(&mut rt).is_ok());
 
             assert!(rt.thread.state == ThreadState::Waiting);
             assert!(!(*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
             assert!((*WAIT_QUEUE.get()).contains(wait_entity(&mut rt.thread)));
+            assert!(ptr::eq(
+                rt_ktimer_entity(&mut rt.thread),
+                ktimer.entity_mut()
+            ));
+
+            assert!(enqueue_rt_thread_from_waitq(&mut rt).is_ok());
+
+            assert!(rt.thread.state == ThreadState::Ready);
+            assert!(
+                (*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()),
+                "deadlines after enqueue from waitq: {:?}",
+                collect_deadlines_at(&*KTIMER_QUEUE.get())
+            );
+            assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(&mut rt.thread)));
         }
     }
 
