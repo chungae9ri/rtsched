@@ -587,6 +587,17 @@ pub(crate) unsafe fn yield_ktimer(
 ) -> *mut KTimerEntity {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
+        yield_ktimer_in_queue(queue, entity, elapsed, reset_runtime)
+    })
+}
+
+unsafe fn yield_ktimer_in_queue(
+    queue: &mut KTimerQueue,
+    entity: *mut KTimerEntity,
+    elapsed: u32,
+    reset_runtime: bool,
+) -> *mut KTimerEntity {
+    unsafe {
         if entity.is_null() {
             return ptr::null_mut();
         }
@@ -637,7 +648,7 @@ pub(crate) unsafe fn yield_ktimer(
         } else {
             next
         }
-    })
+    }
 }
 
 pub(crate) fn program_next_systick() -> Option<u32> {
@@ -861,7 +872,34 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thread::RtThread;
+    use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread};
+    use std::sync::Mutex;
     use std::vec::Vec;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn rt_thread(name: &'static str) -> RtThread {
+        RtThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 1,
+                name,
+                state: ThreadState::Ready,
+                is_cfs: false,
+            },
+            wait_entity: WaitEntity::new(),
+            ktimer_entity: ptr::null_mut(),
+            runtime: 0,
+        }
+    }
+
+    fn reset_wait_queue() {
+        unsafe {
+            *WAIT_QUEUE.get() = RBTree::new();
+        }
+    }
 
     fn collect_deadlines_at(queue: &KTimerQueue) -> Vec<u64> {
         let mut deadlines = Vec::new();
@@ -1041,5 +1079,137 @@ mod tests {
         assert_eq!(queue.len(), 0);
         assert_eq!(queue.next_deadline(), None);
         assert_eq!(queue.next_reload(), None);
+    }
+
+    #[test]
+    fn rt_yield_marks_timer_inactive_and_preserves_remaining_period() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(100, ptr::null_mut(), "rt");
+        let mut active_later = KTimerEntity::new(200);
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+
+            let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 20, false);
+            assert!(ptr::eq(next, &mut active_later));
+        }
+
+        assert_eq!(rt.runtime, 20);
+        assert!(!ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(queue.now_ticks(), 20);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 80);
+    }
+
+    #[test]
+    fn rt_yield_with_reset_runtime_finishes_current_job_window() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(60, ptr::null_mut(), "rt");
+        let mut active_later = KTimerEntity::new(120);
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+
+            let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
+            assert!(ptr::eq(next, &mut active_later));
+        }
+
+        assert_eq!(rt.runtime, 0);
+        assert!(!ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 60);
+        assert_eq!(queue.now_ticks(), 15);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
+    }
+
+    #[test]
+    fn wake_wait_thread_charges_wait_elapsed_to_rt_period() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_wait_queue();
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(100, ptr::null_mut(), "rt");
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            rt.runtime = 20;
+            rt.thread.state = ThreadState::Waiting;
+            rt.wait_entity.set_wake_after(0, 50);
+            insert_wait_thread(&mut rt.thread);
+        }
+
+        queue.advance_time(50);
+
+        unsafe {
+            wake_wait_thread(&mut queue, 30);
+        }
+
+        assert!(rt.thread.state == ThreadState::Ready);
+        assert_eq!(rt.runtime, 50);
+        assert!(ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 50);
+        assert!(ptr::eq(queue.first_active(), ktimer.entity_mut()));
+    }
+
+    #[test]
+    fn dispatch_expired_active_rt_timer_records_deadline_miss() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            rt.runtime = 55;
+            ktimer.entity.set_deadline_at(10);
+            queue.insert(ktimer.entity_mut());
+        }
+
+        queue.advance_time(10);
+        let next = unsafe { queue.dispatch_expired(10) };
+
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(ktimer.entity.miss_cnt, 1);
+        assert_eq!(rt.runtime, 0);
+        assert!(ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 60);
+    }
+
+    #[test]
+    fn dispatch_expired_inactive_rt_timer_reactivates_without_miss() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            rt.runtime = 30;
+            ktimer.entity.set_active(false);
+            ktimer.entity.set_deadline_at(10);
+            queue.insert(ktimer.entity_mut());
+        }
+
+        queue.advance_time(10);
+        let next = unsafe { queue.dispatch_expired(10) };
+
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(ktimer.entity.miss_cnt, 0);
+        assert_eq!(rt.runtime, 0);
+        assert!(ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 60);
     }
 }
