@@ -808,7 +808,6 @@ impl KTimerQueue {
 
             let next = self.first_active();
             if next.is_null() {
-                // TODO: If no more active timers, run cpu idle thread
                 activate_cfs_ktimer()
             } else {
                 next
