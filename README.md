@@ -70,15 +70,20 @@ When `RtThread` completes its job, it should call `yieldyi` to make itself inact
 ## CFS (Completely Fair Scheduler) Scheduler
 
 CFS scheduler assigns the CFS time slot to all CFS tasks based on the priority-based
-virtual runtime (`vruntime`).
-`vruntime` of each CFS thread is defined as:
+virtual runtime (`vruntime`). CFS priority is inverse-numeric: `1` is the most
+favored priority, and larger numeric values are less favored.
+
+`vruntime` of each CFS thread is charged as:
 vruntime = (ticks_consumed * priority) / priority_sum_of_all_CFS_threads
 
-Lower numeric `priority` values are favored because their `vruntime` grows more slowly. CFS scheduler
-makes this vruntime fair among the CFS threads.
+Because the scheduler selects the CFS thread with the smallest `vruntime`, lower
+numeric `priority` values are favored because their `vruntime` grows more slowly.
+For example, with the same `priority_sum`, a thread with priority `1` accumulates
+one fourth as much `vruntime` as a thread with priority `4` for the same elapsed
+ticks.
 
-CFS scheduler doesn't starve lower-priority threads because even the lowest-priority thread gets a minimum
-CPU resource slot for running.
+CFS scheduler doesn't starve less-favored threads because even a thread with a
+larger numeric priority gets a minimum CPU resource slot for running.
 
 CFS threads are moved between the `RunQueue` and the `WaitQueue` rbtree by using
 `RbNode` in the `SchedEntity`.

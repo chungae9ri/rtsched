@@ -9,7 +9,7 @@ use crate::ktimer::{
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
     program_next_systick, update_next_ktimer,
 };
-use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
+use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, init_cfs_rq};
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
 
 #[unsafe(no_mangle)]
@@ -52,7 +52,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
 
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
-        //   ticks and its priority.
+        //   ticks and its inverse-numeric priority. Lower numeric priority values are
+        //   favored because they accumulate vruntime more slowly.
         // - If the next expired ktimer is for a CFS thread and current thread is
         //   CFS thread, compare its vruntime with the CURRENT_THREAD_CTX's vruntime
         //   to decide whether to preempt.
@@ -69,10 +70,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             if priority_sum == 0 {
                 return;
             }
-            let priority = u64::from((*current_entity).priority);
-            let priority_sum = u64::from(priority_sum);
-
-            (*current_entity).vruntime += sched_tick_added * priority / priority_sum;
+            (*current_entity).vruntime +=
+                cfs_vruntime_delta(sched_tick_added, (*current_entity).priority, priority_sum);
             (*current_entity).sched_tick_cnt += sched_tick_added;
         }
 

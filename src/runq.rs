@@ -45,12 +45,17 @@ unsafe impl Sync for RunQueue {}
 /// `vruntime` is the primary key. When two entities have the same
 /// `vruntime`, their addresses are used as a stable tie-breaker so insertion
 /// order remains deterministic and the tree keeps a strict total ordering.
+///
+/// CFS priority is inverse-numeric: `1` is the most favored priority and larger
+/// values are less favored. A larger numeric priority charges more `vruntime`
+/// for the same elapsed time, so the scheduler will tend to choose it less
+/// often than a lower numeric priority.
 #[repr(C)]
 pub struct SchedEntity {
     pub(crate) sched_tick_cnt: u64,
     /// Scheduler virtual runtime metric used as the red-black tree key.
     pub(crate) vruntime: u64,
-    /// Scheduling priority, where the exact ordering is defined by the scheduler.
+    /// Non-zero inverse-numeric priority. Lower values are favored.
     pub priority: u32,
     pub(crate) rb_node: RbNode,
 }
@@ -86,6 +91,31 @@ impl SchedEntity {
     pub fn sched_tick_cnt(&self) -> u64 {
         self.sched_tick_cnt
     }
+}
+
+/// Calculate how much `vruntime` to charge for elapsed CFS execution.
+///
+/// Lower numeric CFS priority values are favored because this formula charges
+/// less `vruntime` for the same elapsed time. The scheduler selects the CFS
+/// thread with the smallest `vruntime`.
+pub(crate) fn cfs_vruntime_delta(elapsed_ticks: u64, priority: u32, priority_sum: u32) -> u64 {
+    debug_assert!(priority != 0, "CFS thread priority must be non-zero");
+
+    if priority_sum == 0 {
+        return 0;
+    }
+
+    elapsed_ticks * u64::from(priority) / u64::from(priority_sum)
+}
+
+fn cfs_sched_ticks_from_vruntime(vruntime: u64, priority: u32, priority_sum: u32) -> u64 {
+    debug_assert!(priority != 0, "CFS thread priority must be non-zero");
+
+    if priority_sum == 0 {
+        return 0;
+    }
+
+    vruntime * u64::from(priority_sum) / u64::from(priority)
 }
 
 unsafe impl RBTreeNode for SchedEntity {
@@ -225,7 +255,8 @@ pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
 
         if !leftmost.is_null() {
             (*entity).vruntime = (*leftmost).vruntime;
-            (*entity).sched_tick_cnt = (*entity).vruntime * priority_sum as u64 / priority as u64;
+            (*entity).sched_tick_cnt =
+                cfs_sched_ticks_from_vruntime((*entity).vruntime, priority, priority_sum);
         }
     }
 }
@@ -286,7 +317,8 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
             let priority_sum = *CFS_RUN_QUEUE.priority_sum();
             let priority = (*entity).priority;
 
-            (*entity).sched_tick_cnt = (*entity).vruntime * priority_sum as u64 / priority as u64;
+            (*entity).sched_tick_cnt =
+                cfs_sched_ticks_from_vruntime((*entity).vruntime, priority, priority_sum);
 
             updated.insert(entity);
         }
@@ -410,6 +442,16 @@ mod tests {
 
         assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 14);
         assert_eq!(collect_thread_names(), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn lower_numeric_priority_accumulates_vruntime_more_slowly() {
+        let high_priority_delta = cfs_vruntime_delta(20, 1, 5);
+        let low_priority_delta = cfs_vruntime_delta(20, 4, 5);
+
+        assert_eq!(high_priority_delta, 4);
+        assert_eq!(low_priority_delta, 16);
+        assert!(high_priority_delta < low_priority_delta);
     }
 
     #[test]

@@ -96,8 +96,11 @@ impl<const N: usize> AlignedStack<N> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SchedInfo {
+    /// CFS priority. Must be non-zero; lower numeric values are favored.
     pub priority: u32,
+    /// Raw execution ticks accumulated by the CFS scheduler.
     pub sched_tick_cnt: u64,
+    /// Virtual runtime used for CFS run-queue ordering.
     pub vruntime: u64,
 }
 
@@ -322,6 +325,10 @@ pub struct CfsThreadBuilder {
 }
 
 impl CfsThreadBuilder {
+    /// Create a CFS thread builder.
+    ///
+    /// `priority` must be non-zero. Lower numeric priority values are favored
+    /// because they accumulate CFS `vruntime` more slowly.
     pub const fn new(name: &'static str, entry: ThreadEntry, priority: u32) -> Self {
         Self {
             start: ThreadStart::new(name, entry),
