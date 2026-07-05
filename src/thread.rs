@@ -29,6 +29,39 @@ static mut NEXT_THREAD_ID: u32 = 0;
 const THREAD_STACK_ALIGNMENT: usize = 8;
 const THREAD_INITIAL_FRAME_WORDS: usize = 16;
 
+/// Validation failures that can be reported before a thread is spawned.
+///
+/// Use `try_spawn` when setup code wants to handle these failures explicitly.
+/// The `spawn` convenience methods treat the same cases as programmer errors
+/// and panic with the corresponding message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadSpawnError {
+    NullThreadStorage,
+    NullStack,
+    StackTooSmall {
+        required_words: usize,
+        actual_words: usize,
+    },
+    UnalignedStackTop,
+    ZeroPriority,
+    NullRtTimer,
+}
+
+impl ThreadSpawnError {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NullThreadStorage => "thread storage pointer must be non-null",
+            Self::NullStack => "thread stack pointer must be non-null",
+            Self::StackTooSmall { .. } => {
+                "thread stack must reserve at least 16 words for the initial exception frame"
+            }
+            Self::UnalignedStackTop => "thread stack top must be 8-byte aligned",
+            Self::ZeroPriority => "CFS thread priority must be non-zero",
+            Self::NullRtTimer => "RT thread ktimer must be non-null",
+        }
+    }
+}
+
 /// Execution state for a scheduled thread.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -312,7 +345,28 @@ impl CfsThreadBuilder {
         thread: *mut MaybeUninit<CfsThread>,
         stack: *mut AlignedStack<N>,
     ) -> *mut ThreadCtx {
-        unsafe { spawn_thread(thread, stack, self.start, self.priority) }
+        unsafe {
+            self.try_spawn(thread, stack)
+                .unwrap_or_else(|error| panic!("{}", error.message()))
+        }
+    }
+
+    /// Validate and initialize a CFS thread without panicking on setup errors.
+    ///
+    /// # Safety
+    ///
+    /// `thread` and `stack` must point to valid, uniquely owned storage that
+    /// lives for as long as the thread may run.
+    pub unsafe fn try_spawn<const N: usize>(
+        self,
+        thread: *mut MaybeUninit<CfsThread>,
+        stack: *mut AlignedStack<N>,
+    ) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+        if self.priority == 0 {
+            return Err(ThreadSpawnError::ZeroPriority);
+        }
+
+        unsafe { try_spawn_thread(thread, stack, self.start, self.priority) }
     }
 }
 
@@ -345,33 +399,78 @@ impl RtThreadBuilder {
         thread: *mut MaybeUninit<RtThread>,
         stack: *mut AlignedStack<N>,
     ) -> *mut ThreadCtx {
-        unsafe { spawn_thread(thread, stack, self.start, self.ktimer) }
+        unsafe {
+            self.try_spawn(thread, stack)
+                .unwrap_or_else(|error| panic!("{}", error.message()))
+        }
+    }
+
+    /// Validate and initialize an RT thread without panicking on setup errors.
+    ///
+    /// # Safety
+    ///
+    /// `thread`, `stack`, and `ktimer` must point to valid, uniquely owned
+    /// storage that lives for as long as the thread may run.
+    pub unsafe fn try_spawn<const N: usize>(
+        self,
+        thread: *mut MaybeUninit<RtThread>,
+        stack: *mut AlignedStack<N>,
+    ) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+        if self.ktimer.is_null() {
+            return Err(ThreadSpawnError::NullRtTimer);
+        }
+
+        unsafe { try_spawn_thread(thread, stack, self.start, self.ktimer) }
     }
 }
 
-unsafe fn spawn_thread<T: ThreadControlBlock, const N: usize>(
+unsafe fn try_spawn_thread<T: ThreadControlBlock, const N: usize>(
     thread: *mut MaybeUninit<T>,
     stack: *mut AlignedStack<N>,
     start: ThreadStart,
     init_args: T::InitArgs,
-) -> *mut ThreadCtx {
-    debug_assert!(!thread.is_null(), "thread storage pointer must be non-null");
-    debug_assert!(!stack.is_null(), "thread stack pointer must be non-null");
-    debug_assert!(
-        N >= THREAD_INITIAL_FRAME_WORDS,
-        "thread stack must reserve at least 16 words for the initial exception frame"
-    );
+) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+    validate_thread_storage(thread)?;
+    validate_stack(stack)?;
 
     unsafe {
-        forkyi(
+        Ok(forkyi(
             thread.cast::<T>(),
             stack_top(stack),
             start.entry,
             start.arg,
             start.name,
             init_args,
-        )
+        ))
     }
+}
+
+fn validate_thread_storage<T>(thread: *mut MaybeUninit<T>) -> Result<(), ThreadSpawnError> {
+    if thread.is_null() {
+        Err(ThreadSpawnError::NullThreadStorage)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_stack<const N: usize>(stack: *mut AlignedStack<N>) -> Result<(), ThreadSpawnError> {
+    if stack.is_null() {
+        return Err(ThreadSpawnError::NullStack);
+    }
+
+    if N < THREAD_INITIAL_FRAME_WORDS {
+        return Err(ThreadSpawnError::StackTooSmall {
+            required_words: THREAD_INITIAL_FRAME_WORDS,
+            actual_words: N,
+        });
+    }
+
+    let top = unsafe { (*stack).0.as_ptr().wrapping_add(N) };
+    if top as usize % THREAD_STACK_ALIGNMENT != 0 {
+        return Err(ThreadSpawnError::UnalignedStackTop);
+    }
+
+    Ok(())
 }
 
 unsafe fn stack_top<const N: usize>(stack: *mut AlignedStack<N>) -> *mut u32 {
@@ -535,7 +634,7 @@ pub(crate) unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut R
 
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
     unsafe {
-        if !CURRENT_THREAD_IS_CFS {
+        if !CURRENT_THREAD_CTX.is_null() && !CURRENT_THREAD_IS_CFS {
             let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
             (*rt_thread).runtime = start_time;
             true
@@ -716,6 +815,67 @@ mod tests {
     }
 
     #[test]
+    fn cfs_thread_builder_try_spawn_reports_validation_errors() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+        let mut stack = AlignedStack([0; 64]);
+        let mut small_stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS - 1]);
+        let mut odd_stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS + 1]);
+
+        unsafe {
+            assert_eq!(
+                CfsThreadBuilder::new("bad", test_entry, 1).try_spawn(ptr::null_mut(), &mut stack),
+                Err(ThreadSpawnError::NullThreadStorage)
+            );
+            assert_eq!(
+                CfsThreadBuilder::new("bad", test_entry, 1)
+                    .try_spawn(&mut storage, ptr::null_mut::<AlignedStack<64>>()),
+                Err(ThreadSpawnError::NullStack)
+            );
+            assert_eq!(
+                CfsThreadBuilder::new("bad", test_entry, 1)
+                    .try_spawn(&mut storage, &mut small_stack),
+                Err(ThreadSpawnError::StackTooSmall {
+                    required_words: THREAD_INITIAL_FRAME_WORDS,
+                    actual_words: THREAD_INITIAL_FRAME_WORDS - 1,
+                })
+            );
+            assert_eq!(
+                CfsThreadBuilder::new("bad", test_entry, 1).try_spawn(&mut storage, &mut odd_stack),
+                Err(ThreadSpawnError::UnalignedStackTop)
+            );
+            assert_eq!(
+                CfsThreadBuilder::new("bad", test_entry, 0).try_spawn(&mut storage, &mut stack),
+                Err(ThreadSpawnError::ZeroPriority)
+            );
+        }
+    }
+
+    #[test]
+    fn rt_thread_builder_try_spawn_reports_null_timer() {
+        let mut storage = MaybeUninit::<RtThread>::uninit();
+        let mut stack = AlignedStack([0; 64]);
+
+        unsafe {
+            assert_eq!(
+                RtThreadBuilder::new("bad", test_entry, ptr::null_mut())
+                    .try_spawn(&mut storage, &mut stack),
+                Err(ThreadSpawnError::NullRtTimer)
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "CFS thread priority must be non-zero")]
+    fn cfs_thread_builder_spawn_panics_on_zero_priority() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+        let mut stack = AlignedStack([0; 64]);
+
+        unsafe {
+            CfsThreadBuilder::new("bad", test_entry, 0).spawn(&mut storage, &mut stack);
+        }
+    }
+
+    #[test]
     #[should_panic(expected = "thread storage pointer must be non-null")]
     fn raw_forkyi_rejects_null_thread_storage() {
         let mut stack = AlignedStack([0; 64]);
@@ -862,5 +1022,17 @@ mod tests {
             CURRENT_THREAD_CTX = ptr::null_mut();
             CURRENT_THREAD_IS_CFS = false;
         }
+    }
+
+    #[test]
+    fn set_rt_thread_start_time_ignores_missing_current_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+
+        assert!(!set_rt_thread_start_time(42));
     }
 }

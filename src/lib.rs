@@ -112,7 +112,7 @@ mod waitq;
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
     AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
-    ThreadEntry, ThreadStart, ThreadState, current_rt_thread_runtime, msleepyi,
+    ThreadEntry, ThreadSpawnError, ThreadStart, ThreadState, current_rt_thread_runtime, msleepyi,
     set_rt_thread_start_time, yieldyi,
 };
 
