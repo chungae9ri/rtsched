@@ -100,7 +100,7 @@ mod arch {
     }
 }
 mod clock;
-pub mod ktimer;
+mod ktimer;
 #[doc(hidden)]
 pub mod print;
 mod rbtree;
@@ -111,8 +111,9 @@ mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, RtThread, ThreadCtx, ThreadState, current_rt_thread_runtime, forkyi,
-    msleepyi, set_rt_thread_start_time, yieldyi,
+    AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
+    ThreadEntry, ThreadSpawnError, ThreadStart, ThreadState, current_rt_thread_runtime, msleepyi,
+    set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
@@ -127,18 +128,16 @@ pub use arch::timer_cm::{
 };
 
 pub use ktimer::{
-    KTimerEntity, RtKTimer, WaitKTimer, dequeue_ktimerq_to_waitq, dequeue_rt_thread_to_waitq,
-    enqueue_ktimer, enqueue_ktimerq_from_waitq, enqueue_rt_thread_from_waitq, init_ktimer_queue,
-    is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue, traverse_ktimer_queue_fn,
+    RtKTimer, RtTiming, dequeue_rt_thread_to_waitq, enqueue_rt_thread_from_waitq,
+    init_ktimer_queue, is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue,
+    traverse_ktimer_queue_fn,
 };
 
-pub use runq::{
-    dequeue_cfs_thread_to_waitq, dequeue_runq_to_waitq, traverse_run_queue, traverse_run_queue_fn,
-};
+pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
 
 pub use sched::{handle_sched_tick, init_cfs};
 
-pub use waitq::{WaitQueueError, traverse_wait_queue, traverse_wait_queue_fn};
+pub use waitq::{WaitQueueError, traverse_wait_queue_fn};
 
 #[cfg(all(test, not(target_arch = "arm")))]
 mod tests {

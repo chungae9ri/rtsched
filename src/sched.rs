@@ -9,7 +9,7 @@ use crate::ktimer::{
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
     program_next_systick, update_next_ktimer,
 };
-use crate::runq::{CFS_RUN_QUEUE, SchedEntity, init_cfs_rq};
+use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, init_cfs_rq};
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
 
 #[unsafe(no_mangle)]
@@ -52,7 +52,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
 
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
-        //   ticks and its priority.
+        //   ticks and its inverse-numeric priority. Lower numeric priority values are
+        //   favored because they accumulate vruntime more slowly.
         // - If the next expired ktimer is for a CFS thread and current thread is
         //   CFS thread, compare its vruntime with the CURRENT_THREAD_CTX's vruntime
         //   to decide whether to preempt.
@@ -69,10 +70,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             if priority_sum == 0 {
                 return;
             }
-            let priority = u64::from((*current_entity).priority);
-            let priority_sum = u64::from(priority_sum);
-
-            (*current_entity).vruntime += sched_tick_added * priority / priority_sum;
+            (*current_entity).vruntime +=
+                cfs_vruntime_delta(sched_tick_added, (*current_entity).priority, priority_sum);
             (*current_entity).sched_tick_cnt += sched_tick_added;
         }
 
@@ -138,9 +137,10 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
 ///   RT thread, CFS_KTIMER or WAIT_KTIMER) that should preempt the current thread.
 /// - For wait KTimer, it means there is a WAITING thread in the WAIT_QUEUE that needs to be
 ///   woken up and moved to the runq and should be scheduled.
-/// - For RT KTimer, if active is true, it means current RT thread misses its deadline.
-///   If active is false, current RT thread finishes its job before its deadline.
-///   Both cases reset its deadline with duratioin and reactivate RT thread to be scheduled next.
+/// - For RT KTimer, if its active is true, it means current RT thread misses its deadline.
+///   If its active is false, current RT thread finishes its job before its deadline.
+///   Active RT timers are re-armed with their relative deadline; inactive RT timers
+///   are reactivated at their next period release.
 pub fn handle_sched_tick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
@@ -248,7 +248,7 @@ mod tests {
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
             let cfs = ptr::addr_of!(CFS_KTIMER);
             let entity = ptr::addr_of!((*cfs).entity);
-            assert_eq!((*entity).duration(), 100);
+            assert_eq!((*cfs).period_ticks(), 100);
             assert_eq!((*entity).deadline(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
             assert!((*entity).is_active());

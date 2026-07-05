@@ -123,7 +123,7 @@ unsafe impl RBTreeNode for WaitEntity {
 ///
 /// The caller must ensure that any provided thread pointer remains valid and
 /// that the wait queue is not mutated during traversal.
-pub unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
+pub(crate) unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
     unsafe {
         let tree = &*WAIT_QUEUE.get();
         let entity = match cursor {

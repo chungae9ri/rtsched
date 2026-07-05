@@ -43,6 +43,7 @@ impl RbNode {
         self.color = Color::Red;
     }
 
+    #[allow(dead_code)]
     pub fn is_linked(&self) -> bool {
         !self.parent.is_null() || !self.left.is_null() || !self.right.is_null()
     }

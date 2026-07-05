@@ -21,32 +21,53 @@ clock configuration, `SysTick` configuration, thread stack allocation, and
 concrete thread storage. The board initializes the ktimer queue and CFS scheduler,
 creates threads with dedicated stacks, then starts the first thread with `spawn_main_thread`.
 
+## Error handling policy
+
+`rtsched` uses three failure styles:
+
+- Return `Result` or `Option` for runtime state that board code can handle, such as
+  wait-queue transitions, missing current RT runtime, and missing next timer reload.
+- Panic for public setup mistakes that would make scheduler state invalid, such as
+  zero CFS priority, a null RT timer, null thread storage, null stack storage,
+  too-small stacks, or unaligned stack tops. The thread builders also provide
+  `try_spawn` variants that return `ThreadSpawnError` for these setup checks.
+- Use `debug_assert!` for internal unsafe invariants that should already be guaranteed by
+  safe wrappers or scheduler ownership rules, such as intrusive-tree duplicate insertion
+  checks and raw pointer downcasts.
+
 ## KTimer framework
 
 The `KTimer` framework is the foundation for both CFS and RT scheduling. It builds a
 red-black tree with `KTimerEntity` defined as:
 ```
 pub struct KTimerEntity {
-    duration: KTimerDuration,
     deadline_at: u64,
     node: RbNode,
     active: bool,
     pub miss_cnt: u32,
 }
 ```
-The `duration` field is the scheduling period for timers (`RtKTimer` and `CfsKTimer`). `SysTick`
-programming works differently for `CfsKTimer` and `RtKTimer`.
+`KTimerEntity` stores intrusive queue state and the next absolute timer
+expiration. Timing policy lives in the owning timer type: `CfsKTimer` keeps the
+CFS `period_ticks`/`execution_ticks`, and `RtKTimer` keeps explicit
+`period_ticks`, `relative_deadline_ticks`, and `budget_ticks` values.
+The embedded `KTimerEntity` is keyed by the next absolute deadline or release
+time. `SysTick` programming works differently for `CfsKTimer` and `RtKTimer`.
 When `CfsKTimer` switches to active, it programs `SysTick` with its `execution_ticks`.
 When `CfsKTimer` is switched out, its `deadline_at` is set to the end of the current CFS period and
 the timer is marked `inactive`.
 
-`RtThread` has its own duration value for its periodic scheduling and should finish its task within this duration.
+`RtThread` timing is split into three meanings:
+
+- `period_ticks`: time between releases of consecutive jobs.
+- `relative_deadline_ticks`: time from release to the job's scheduling deadline.
+- `budget_ticks`: runtime budget checked against `RtThread::runtime`.
 
 `deadline_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
 dispatch expiry in `SysTick` interrupt handler, `yieldyi`, wait timer programming in `msleepyi`.
 
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
-`runtime`, `deadline_at`.
+`runtime`. The inactive RT timer is parked until the next `period_ticks` release.
 
 `RbNode` is the entry to the `KTimer` rbtree.
 
@@ -56,37 +77,53 @@ When `RtThread` completes its job, it should call `yieldyi` to make itself inact
 ## CFS (Completely Fair Scheduler) Scheduler
 
 CFS scheduler assigns the CFS time slot to all CFS tasks based on the priority-based
-virtual runtime (`vruntime`).
-`vruntime` of each CFS thread is defined as:
+virtual runtime (`vruntime`). CFS priority is inverse-numeric: `1` is the most
+favored priority, and larger numeric values are less favored.
+
+`vruntime` of each CFS thread is charged as:
 vruntime = (ticks_consumed * priority) / priority_sum_of_all_CFS_threads
 
-Lower numeric `priority` values are favored because their `vruntime` grows more slowly. CFS scheduler
-makes this vruntime fair among the CFS threads.
+Because the scheduler selects the CFS thread with the smallest `vruntime`, lower
+numeric `priority` values are favored because their `vruntime` grows more slowly.
+For example, with the same `priority_sum`, a thread with priority `1` accumulates
+one fourth as much `vruntime` as a thread with priority `4` for the same elapsed
+ticks.
 
-CFS scheduler doesn't starve lower-priority threads because even the lowest-priority thread gets a minimum
-CPU resource slot for running.
+CFS scheduler doesn't starve less-favored threads because even a thread with a
+larger numeric priority gets a minimum CPU resource slot for running.
 
 CFS threads are moved between the `RunQueue` and the `WaitQueue` rbtree by using
 `RbNode` in the `SchedEntity`.
 
-CFS has a dedicated `CfsKTimer` with `execution_ticks` and `duration`. `execution_ticks` is the
+CFS has a dedicated `CfsKTimer` with `period_ticks` and `execution_ticks`. `execution_ticks` is the
 time slice for one CFS scheduling window.
 
 CFS scheduling is used for non-time critical threads such as shell thread for user interaction.
 
 ## Soft Realtime Scheduler for RtThread
 
-Each `RtThread` has its own entry with duration and `deadline_at` in the `KTimer` red-black tree (rbtree).
+Each `RtThread` has its own `RtKTimer` entry in the `KTimer` red-black tree (rbtree).
 
 `RtThread` should complete its job before the deadline and yield (`yieldyi`) CPU ownership to the next thread
-at the left-most entry in the `KTimer` rbtree. When the current `RtThread` yields, current `RtThread` is
-set to `inactive` and reinserted with a new `deadline_at` based on the post-yield `now_ticks` plus the
-unused ticks in its duration. It becomes active again when that timer expires.
+at the left-most entry in the `KTimer` rbtree. Active RT timers are ordered by
+their absolute job deadline, computed from `relative_deadline_ticks`. When the
+current `RtThread` yields after finishing a job, it is set to `inactive` and
+reinserted with a new `deadline_at` based on the next `period_ticks` release. It
+becomes active again when that release timer expires, with a fresh relative
+deadline.
+
+`RtKTimer::new(period_ticks, ...)` keeps the compatibility behavior where period,
+relative deadline, and budget all use the same tick value. Use
+`RtKTimer::new_with_timing(RtTiming::new(period_ticks, relative_deadline_ticks,
+budget_ticks), ...)` when those meanings differ.
 
 ## Example of scheduling
 
 C: runtime needed to finish one job
-D: periodic time (duration) of the thread (initial deadline)
+D: relative deadline of the thread
+T: period between job releases
+
+The examples below use `T = D`.
 
 example 1:
 
