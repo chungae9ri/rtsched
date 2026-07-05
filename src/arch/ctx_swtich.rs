@@ -7,7 +7,7 @@ use core::ptr;
 use cortex_m::peripheral::SCB;
 
 use crate::runq::CFS_RUN_QUEUE;
-use crate::sched::CURRENT_THREAD_IS_CFS;
+use crate::sched::{CURRENT_THREAD_IS_CFS, is_idle_thread};
 use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity};
 
 #[unsafe(no_mangle)]
@@ -21,7 +21,9 @@ static mut START_THREAD_PTR: *mut ThreadCtx = ptr::null_mut();
 /// handler mode.
 pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
     unsafe {
-        (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
+        if !is_idle_thread(thread) {
+            (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
+        }
         (*thread).state = ThreadState::Running;
         START_THREAD_PTR = thread;
         CURRENT_THREAD_IS_CFS = true;

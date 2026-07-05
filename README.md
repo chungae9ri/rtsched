@@ -12,6 +12,7 @@ The crate includes:
 - `RtThread` associated with a dedicated `KTimer` entry for `EDF` scheduling.
 - `WaitQueue` red-black tree for threads in `Waiting` state.
 - Thread spawn with a dedicated stack (`forkyi`).
+- Registered idle thread fallback when no normal CFS or RT work is runnable.
 - CPU resource yielding (`yieldyi`) to the next `active` scheduler timer/entity.
 - Preemptive context switching support.
 - `SysTick` integration for advancing timers and requesting scheduler dispatch.
@@ -19,7 +20,8 @@ The crate includes:
 `rtsched` is intended to be used by a board crate that owns hardware setup,
 clock configuration, `SysTick` configuration, thread stack allocation, and
 concrete thread storage. The board initializes the ktimer queue and CFS scheduler,
-creates threads with dedicated stacks, then starts the first thread with `spawn_main_thread`.
+creates threads with dedicated stacks, registers the idle thread with
+`register_idle_thread`, then starts the first thread with `spawn_main_thread`.
 
 ## Error handling policy
 
@@ -99,6 +101,12 @@ CFS has a dedicated `CfsKTimer` with `period_ticks` and `execution_ticks`. `exec
 time slice for one CFS scheduling window.
 
 CFS scheduling is used for non-time critical threads such as shell thread for user interaction.
+
+The idle thread is a CFS thread registered through `register_idle_thread`. It is
+removed from the CFS run queue and does not participate in CFS fairness
+accounting. The scheduler selects it only when no normal CFS thread is runnable
+and no active RT timer should run. Diagnostics can inspect it through
+`traverse_idle_thread_fn`.
 
 ## Soft Realtime Scheduler for RtThread
 

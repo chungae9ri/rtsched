@@ -286,9 +286,13 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     unsafe {
         if (*thread).state == ThreadState::Ready {
             let entity = cfs_sched_entity(thread);
-            (*CFS_RUN_QUEUE.get()).remove(entity);
-            let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
-            *CFS_RUN_QUEUE.priority_sum() = priority_sum;
+            let tree = &mut *CFS_RUN_QUEUE.get();
+            if tree.contains(entity.cast_const()) {
+                tree.remove(entity);
+                let priority_sum =
+                    (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
+                *CFS_RUN_QUEUE.priority_sum() = priority_sum;
+            }
         }
     }
 }
