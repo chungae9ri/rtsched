@@ -767,9 +767,6 @@ unsafe fn yield_ktimer_in_queue(
         queue.insert(entity);
         let next = queue.first_active();
         if next.is_null() {
-            // TODO:
-            // If there no more active timers, select timer
-            // for cpu_idle thread.
             activate_cfs_ktimer()
         } else {
             next
