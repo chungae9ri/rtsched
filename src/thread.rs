@@ -26,6 +26,8 @@ use crate::waitq::WaitEntity;
 /// is needed. When dynamic thread creation is added, this should be
 /// protected by a mutex or replaced with an atomic counter.
 static mut NEXT_THREAD_ID: u32 = 0;
+const THREAD_STACK_ALIGNMENT: usize = 8;
+const THREAD_INITIAL_FRAME_WORDS: usize = 16;
 
 /// Execution state for a scheduled thread.
 #[repr(C)]
@@ -49,7 +51,13 @@ impl<const N: usize> AlignedStack<N> {
     /// Cortex-M stacks grow downward, so this is the initial stack pointer used
     /// when building a new thread frame.
     pub fn top(&mut self) -> *mut u32 {
-        self.0.as_mut_ptr().wrapping_add(N)
+        let top = self.0.as_mut_ptr().wrapping_add(N);
+        debug_assert_eq!(
+            top as usize % THREAD_STACK_ALIGNMENT,
+            0,
+            "thread stack top must be 8-byte aligned"
+        );
+        top
     }
 }
 
@@ -347,8 +355,12 @@ unsafe fn spawn_thread<T: ThreadControlBlock, const N: usize>(
     start: ThreadStart,
     init_args: T::InitArgs,
 ) -> *mut ThreadCtx {
-    debug_assert!(!thread.is_null());
-    debug_assert!(!stack.is_null());
+    debug_assert!(!thread.is_null(), "thread storage pointer must be non-null");
+    debug_assert!(!stack.is_null(), "thread stack pointer must be non-null");
+    debug_assert!(
+        N >= THREAD_INITIAL_FRAME_WORDS,
+        "thread stack must reserve at least 16 words for the initial exception frame"
+    );
 
     unsafe {
         forkyi(
@@ -363,9 +375,9 @@ unsafe fn spawn_thread<T: ThreadControlBlock, const N: usize>(
 }
 
 unsafe fn stack_top<const N: usize>(stack: *mut AlignedStack<N>) -> *mut u32 {
-    debug_assert!(!stack.is_null());
+    debug_assert!(!stack.is_null(), "thread stack pointer must be non-null");
 
-    unsafe { ptr::addr_of_mut!((*stack).0).cast::<u32>().add(N) }
+    unsafe { (*stack).top() }
 }
 
 pub unsafe fn forkyi<T: ThreadControlBlock>(
@@ -376,6 +388,14 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     name: &'static str,
     init_args: T::InitArgs,
 ) -> *mut ThreadCtx {
+    debug_assert!(!thread.is_null(), "thread storage pointer must be non-null");
+    debug_assert!(!sp.is_null(), "thread stack pointer must be non-null");
+    debug_assert_eq!(
+        sp as usize % THREAD_STACK_ALIGNMENT,
+        0,
+        "thread stack top must be 8-byte aligned"
+    );
+
     // Build the initial stack so that, after PendSV restores r4-r11 and sets
     // PSP, exception return consumes a standard hardware frame:
     // r0, r1, r2, r3, r12, lr, pc, xpsr.
@@ -385,7 +405,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     // an extended exception frame.
     unsafe {
         // Exception return requires an 8-byte aligned stack.
-        sp = ((sp as usize) & !0x7) as *mut u32;
+        sp = ((sp as usize) & !(THREAD_STACK_ALIGNMENT - 1)) as *mut u32;
 
         sp = sp.sub(1);
         *sp = 0x0100_0000; // xPSR: Thumb state
@@ -679,6 +699,72 @@ mod tests {
                 ktimer.entity_mut()
             ));
             assert!(ptr::eq(ktimer.thread_ctx(), thread));
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "thread stack must reserve at least 16 words for the initial exception frame"
+    )]
+    fn cfs_thread_builder_rejects_too_small_stack() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+        let mut stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS - 1]);
+
+        unsafe {
+            CfsThreadBuilder::new("bad", test_entry, 1).spawn(&mut storage, &mut stack);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "thread storage pointer must be non-null")]
+    fn raw_forkyi_rejects_null_thread_storage() {
+        let mut stack = AlignedStack([0; 64]);
+
+        unsafe {
+            forkyi::<CfsThread>(
+                ptr::null_mut(),
+                stack.top(),
+                test_entry,
+                ptr::null_mut(),
+                "bad",
+                1,
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "thread stack pointer must be non-null")]
+    fn raw_forkyi_rejects_null_stack_pointer() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+
+        unsafe {
+            forkyi(
+                storage.as_mut_ptr(),
+                ptr::null_mut(),
+                test_entry,
+                ptr::null_mut(),
+                "bad",
+                1,
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "thread stack top must be 8-byte aligned")]
+    fn raw_forkyi_rejects_unaligned_stack_top() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+        let mut stack = AlignedStack([0; 64]);
+        let unaligned_sp = unsafe { stack.top().sub(1) };
+
+        unsafe {
+            forkyi(
+                storage.as_mut_ptr(),
+                unaligned_sp,
+                test_entry,
+                ptr::null_mut(),
+                "bad",
+                1,
+            );
         }
     }
 
