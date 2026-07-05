@@ -137,9 +137,10 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
 ///   RT thread, CFS_KTIMER or WAIT_KTIMER) that should preempt the current thread.
 /// - For wait KTimer, it means there is a WAITING thread in the WAIT_QUEUE that needs to be
 ///   woken up and moved to the runq and should be scheduled.
-/// - For RT KTimer, if active is true, it means current RT thread misses its deadline.
-///   If active is false, current RT thread finishes its job before its deadline.
-///   Both cases reset its deadline with duratioin and reactivate RT thread to be scheduled next.
+/// - For RT KTimer, if its active is true, it means current RT thread misses its deadline.
+///   If its active is false, current RT thread finishes its job before its deadline.
+///   Active RT timers are re-armed with their relative deadline; inactive RT timers
+///   are reactivated at their next period release.
 pub fn handle_sched_tick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
@@ -247,7 +248,7 @@ mod tests {
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
             let cfs = ptr::addr_of!(CFS_KTIMER);
             let entity = ptr::addr_of!((*cfs).entity);
-            assert_eq!((*entity).duration(), 100);
+            assert_eq!((*cfs).period_ticks(), 100);
             assert_eq!((*entity).deadline(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
             assert!((*entity).is_active());
