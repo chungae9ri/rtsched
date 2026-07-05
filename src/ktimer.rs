@@ -50,7 +50,7 @@ impl GlobalKTimerQueue {
 unsafe impl Sync for GlobalKTimerQueue {}
 
 #[repr(C)]
-pub struct KTimerEntity {
+pub(crate) struct KTimerEntity {
     duration: KTimerDuration,
     deadline_at: u64,
     node: RbNode,
@@ -88,6 +88,7 @@ impl KTimerEntity {
         self.duration.ticks()
     }
 
+    #[allow(dead_code)]
     pub fn deadline(&self) -> u32 {
         self.deadline_at.min(u64::from(u32::MAX)) as u32
     }
@@ -96,6 +97,7 @@ impl KTimerEntity {
         self.deadline_at = u64::from(deadline);
     }
 
+    #[allow(dead_code)]
     pub fn deadline_at(&self) -> u64 {
         self.deadline_at
     }
@@ -130,6 +132,7 @@ impl KTimerEntity {
         self.node.reset_links();
     }
 
+    #[allow(dead_code)]
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
     }
@@ -162,7 +165,7 @@ impl KTimerEntity {
 }
 
 #[repr(C)]
-pub struct CfsKTimer {
+pub(crate) struct CfsKTimer {
     pub entity: KTimerEntity,
     pub name: &'static str,
     pub execution_ticks: u32,
@@ -187,19 +190,12 @@ impl CfsKTimer {
 }
 
 #[repr(C)]
-pub struct WaitKTimer {
-    pub entity: KTimerEntity,
-    pub name: &'static str,
+pub(crate) struct WaitKTimer {
+    pub(crate) entity: KTimerEntity,
+    pub(crate) name: &'static str,
 }
 
 impl WaitKTimer {
-    pub const fn new(duration: u32, name: &'static str) -> Self {
-        Self {
-            entity: KTimerEntity::new(duration),
-            name,
-        }
-    }
-
     pub const fn inactive() -> Self {
         Self {
             entity: KTimerEntity {
@@ -216,15 +212,11 @@ impl WaitKTimer {
     pub fn entity_mut(&mut self) -> *mut KTimerEntity {
         ptr::addr_of_mut!(self.entity)
     }
-
-    pub fn reset_links(&mut self) {
-        self.entity.reset_links();
-    }
 }
 
 #[repr(C)]
 pub struct RtKTimer {
-    pub entity: KTimerEntity,
+    pub(crate) entity: KTimerEntity,
     pub name: &'static str,
     thread_ctx: *mut ThreadCtx,
 }
@@ -238,15 +230,15 @@ impl RtKTimer {
         }
     }
 
-    pub fn entity_mut(&mut self) -> *mut KTimerEntity {
+    pub(crate) fn entity_mut(&mut self) -> *mut KTimerEntity {
         ptr::addr_of_mut!(self.entity)
     }
 
-    pub fn thread_ctx(&self) -> *mut ThreadCtx {
+    pub(crate) fn thread_ctx(&self) -> *mut ThreadCtx {
         self.thread_ctx
     }
 
-    pub fn init_rt_ktimer(&mut self, thread_ctx: *mut ThreadCtx) {
+    pub(crate) fn init_rt_ktimer(&mut self, thread_ctx: *mut ThreadCtx) {
         self.thread_ctx = thread_ctx;
         if !thread_ctx.is_null() {
             unsafe {
@@ -278,7 +270,7 @@ pub unsafe fn init_ktimer_queue() {
     });
 }
 
-pub unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
+pub(crate) unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
         debug_assert!(
@@ -413,7 +405,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
     }
 }
 
-pub fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         if thread.is_null() || (*thread).is_cfs {
             return Err(WaitQueueError::NotFound);
@@ -438,7 +430,7 @@ pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueue
     dequeue_ktimerq_to_waitq(thread.thread_ctx_mut())
 }
 
-pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         if thread.is_null() || (*thread).is_cfs {
             return Err(WaitQueueError::NotFound);
@@ -461,10 +453,6 @@ pub fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueu
 
 pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
     enqueue_ktimerq_from_waitq(thread.thread_ctx_mut())
-}
-
-pub fn next_ktimer_deadline() -> Option<u32> {
-    critical_section(|| unsafe { (*KTIMER_QUEUE.get()).next_deadline() })
 }
 
 pub fn next_ktimer_reload() -> Option<u32> {
@@ -748,14 +736,17 @@ impl KTimerQueue {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.tree.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.tree.len()
     }
 
+    #[allow(dead_code)]
     pub fn root(&self) -> *mut KTimerEntity {
         self.tree.root()
     }
@@ -764,6 +755,7 @@ impl KTimerQueue {
         self.tree.first()
     }
 
+    #[allow(dead_code)]
     pub fn last(&self) -> *mut KTimerEntity {
         self.tree.last()
     }

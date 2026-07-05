@@ -53,6 +53,13 @@ impl<const N: usize> AlignedStack<N> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SchedInfo {
+    pub priority: u32,
+    pub sched_tick_cnt: u64,
+    pub vruntime: u64,
+}
+
 /// Common scheduler-visible thread context.
 ///
 /// `sp` points at the saved stack frame used when restoring the thread.
@@ -78,12 +85,21 @@ pub struct ThreadCtx {
 
 impl ThreadCtx {
     /// Return the CFS scheduling entity for this thread, when this is a CFS thread.
-    pub fn sched_entity(&self) -> Option<&SchedEntity> {
+    pub(crate) fn sched_entity(&self) -> Option<&SchedEntity> {
         if thread_is_cfs(self as *const ThreadCtx) {
             Some(unsafe { &*cfs_sched_entity(self as *const ThreadCtx as *mut ThreadCtx) })
         } else {
             None
         }
+    }
+
+    /// Return a copy of CFS scheduling metrics, when this is a CFS thread.
+    pub fn sched_info(&self) -> Option<SchedInfo> {
+        self.sched_entity().map(|entity| SchedInfo {
+            priority: entity.priority,
+            sched_tick_cnt: entity.sched_tick_cnt(),
+            vruntime: entity.vruntime(),
+        })
     }
 
     /// Return this thread's remaining wait ticks and wait event.
@@ -109,11 +125,11 @@ impl ThreadCtx {
 pub struct CfsThread {
     /// Common context. This must remain the first field because assembly and
     /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
-    pub thread: ThreadCtx,
+    pub(crate) thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
-    pub wait_entity: WaitEntity,
+    pub(crate) wait_entity: WaitEntity,
     /// Scheduler entity used for CFS run-queue ordering.
-    pub sched_entity: SchedEntity,
+    pub(crate) sched_entity: SchedEntity,
 }
 
 impl CfsThread {
@@ -124,22 +140,6 @@ impl CfsThread {
     pub fn thread_ctx_mut(&mut self) -> &mut ThreadCtx {
         &mut self.thread
     }
-
-    pub fn wait_entity(&self) -> &WaitEntity {
-        &self.wait_entity
-    }
-
-    pub fn wait_entity_mut(&mut self) -> &mut WaitEntity {
-        &mut self.wait_entity
-    }
-
-    pub fn sched_entity(&self) -> &SchedEntity {
-        &self.sched_entity
-    }
-
-    pub fn sched_entity_mut(&mut self) -> &mut SchedEntity {
-        &mut self.sched_entity
-    }
 }
 
 /// Thread control block for RT-scheduled threads.
@@ -147,11 +147,11 @@ impl CfsThread {
 pub struct RtThread {
     /// Common context. This must remain the first field because assembly and
     /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
-    pub thread: ThreadCtx,
+    pub(crate) thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
-    pub wait_entity: WaitEntity,
+    pub(crate) wait_entity: WaitEntity,
     /// KTimer entity used for KTimerQueue ordering.
-    pub ktimer_entity: *mut KTimerEntity,
+    pub(crate) ktimer_entity: *mut KTimerEntity,
     /// Elapsed tick counter for the RT thread's current period/job window.
     ///
     /// This is not only CPU execution time: it also includes time spent waiting
@@ -159,7 +159,7 @@ pub struct RtThread {
     /// advance while the thread is sleeping. The counter is charged when the RT
     /// thread yields or is preempted, and also when it wakes from the wait queue.
     /// It is reset when the RT thread starts a new period.
-    pub runtime: u32,
+    pub(crate) runtime: u32,
 }
 
 impl RtThread {
@@ -171,16 +171,16 @@ impl RtThread {
         &mut self.thread
     }
 
-    pub fn wait_entity(&self) -> &WaitEntity {
-        &self.wait_entity
-    }
-
-    pub fn wait_entity_mut(&mut self) -> &mut WaitEntity {
-        &mut self.wait_entity
-    }
-
-    pub fn ktimer_entity(&self) -> Option<NonNull<KTimerEntity>> {
+    pub(crate) fn ktimer_entity(&self) -> Option<NonNull<KTimerEntity>> {
         NonNull::new(self.ktimer_entity)
+    }
+
+    pub fn has_ktimer(&self) -> bool {
+        self.ktimer_entity().is_some()
+    }
+
+    pub fn runtime(&self) -> u32 {
+        self.runtime
     }
 }
 
@@ -688,11 +688,9 @@ mod tests {
         let rt = rt_thread("rt");
 
         assert!(ptr::eq(cfs.thread_ctx(), &cfs.thread));
-        assert!(ptr::eq(cfs.wait_entity(), &cfs.wait_entity));
-        assert!(ptr::eq(cfs.sched_entity(), &cfs.sched_entity));
-        assert!(cfs.thread.sched_entity().is_some());
-        assert!(rt.thread.sched_entity().is_none());
-        assert_eq!(cfs.thread.sched_entity().unwrap().priority, 3);
+        assert!(cfs.thread.sched_info().is_some());
+        assert!(rt.thread.sched_info().is_none());
+        assert_eq!(cfs.thread.sched_info().unwrap().priority, 3);
 
         unsafe {
             let entity = cfs_sched_entity(&mut cfs.thread);
@@ -741,8 +739,7 @@ mod tests {
         let mut ktimer = KTimerEntity::new(10);
 
         assert!(ptr::eq(rt.thread_ctx(), &rt.thread));
-        assert!(ptr::eq(rt.wait_entity(), &rt.wait_entity));
-        assert!(rt.ktimer_entity().is_none());
+        assert!(!rt.has_ktimer());
 
         unsafe {
             CURRENT_THREAD_CTX = &mut rt.thread;

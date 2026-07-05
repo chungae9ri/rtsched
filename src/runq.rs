@@ -72,6 +72,7 @@ impl SchedEntity {
     }
 
     /// Return `true` if the entity is currently linked under another node.
+    #[allow(dead_code)]
     pub fn is_linked(&self) -> bool {
         self.rb_node.is_linked()
     }
@@ -151,7 +152,7 @@ pub(crate) fn thread_is_cfs(thread: *const ThreadCtx) -> bool {
 /// The caller must ensure that any provided thread pointer still refers to a
 /// valid thread control block and that the run queue is not concurrently
 /// mutated in a way that invalidates the traversal step.
-pub unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
+pub(crate) unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
     unsafe {
         let tree = &*CFS_RUN_QUEUE.get();
         match cursor {
@@ -297,7 +298,7 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
     }
 }
 
-pub fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         if thread.is_null() {
             return Err(WaitQueueError::NotFound);
