@@ -72,10 +72,10 @@ unsafe fn switch_to_cfs_thread(next_thread: *mut ThreadCtx) {
             && CURRENT_THREAD_CTX != next_thread
             && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
         {
-            (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
         }
 
-        (*next_thread).state = ThreadState::Running;
+        (*next_thread).set_state(ThreadState::Running);
         CURRENT_THREAD_CTX = next_thread;
         CURRENT_THREAD_IS_CFS = true;
     }
@@ -155,9 +155,9 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
                         if (*current_entity).vruntime > (*next_entity).vruntime {
-                            (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
-                            (*next_thread).state = ThreadState::Running;
+                            (*next_thread).set_state(ThreadState::Running);
                             CURRENT_THREAD_CTX = next_thread;
                             CURRENT_THREAD_IS_CFS = true;
                         } else {
@@ -166,7 +166,7 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                     }
                 } else {
                     if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
-                        (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                        (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                     }
                     switch_to_cfs_thread(next_thread);
                 }
@@ -184,12 +184,12 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             }
 
             if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
-                (*CURRENT_THREAD_CTX).state = ThreadState::Ready;
+                (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                 if CURRENT_THREAD_IS_CFS && !is_idle_thread(CURRENT_THREAD_CTX) {
                     (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
                 }
             }
-            (*next_thread).state = ThreadState::Running;
+            (*next_thread).set_state(ThreadState::Running);
             CURRENT_THREAD_CTX = next_thread;
             CURRENT_THREAD_IS_CFS = false;
         }

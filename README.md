@@ -37,6 +37,20 @@ creates threads with dedicated stacks, registers the idle thread with
   safe wrappers or scheduler ownership rules, such as intrusive-tree duplicate insertion
   checks and raw pointer downcasts.
 
+## Thread States
+
+Each thread has an explicit `ThreadState`:
+
+- `Ready`: eligible to run when selected by the scheduler.
+- `Running`: currently executing on the CPU.
+- `Waiting`: blocked until a timeout or wait condition is satisfied.
+
+Scheduler code uses `ThreadCtx::set_state(ThreadState)` for runtime state changes.
+Normal transitions are `Ready -> Running`, `Running -> Ready`,
+`Running -> Waiting`, `Ready -> Waiting`, and `Waiting -> Ready`. A waiting
+thread must return to `Ready` before it can run again; `Waiting -> Running` is
+not a valid direct transition.
+
 ## KTimer framework
 
 The `KTimer` framework is the foundation for both CFS and RT scheduling. It builds a

@@ -266,7 +266,7 @@ pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
 /// The thread's scheduler entity vruntime field is used as the red-black tree key.
 pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
     unsafe {
-        (*thread).state = ThreadState::Ready;
+        (*thread).set_state(ThreadState::Ready);
         let entity = cfs_sched_entity(thread);
         let tree = &mut *CFS_RUN_QUEUE.get();
         debug_assert!(
@@ -312,7 +312,7 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
 
         (*entity).reset_links();
         *CFS_RUN_QUEUE.priority_sum() = priority_sum;
-        (*thread).state = ThreadState::Ready;
+        (*thread).set_state(ThreadState::Ready);
 
         // Update cfs_rq with priority_sum
         let mut updated = RBTree::new();
@@ -345,7 +345,7 @@ pub(crate) fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQu
         if (*thread).state == ThreadState::Ready {
             (*CFS_RUN_QUEUE.get()).remove(entity);
         }
-        (*thread).state = ThreadState::Waiting;
+        (*thread).set_state(ThreadState::Waiting);
 
         insert_wait_thread(thread);
         let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);

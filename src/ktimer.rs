@@ -434,7 +434,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
                 break;
             }
 
-            (*wait_thread).state = ThreadState::Ready;
+            (*wait_thread).set_state(ThreadState::Ready);
             if (*wait_thread).is_cfs {
                 enqueue_runq_from_waitq(wait_thread);
             } else {
@@ -544,7 +544,7 @@ pub(crate) fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), Wai
         }
 
         remove_ktimer(ktimer_entity);
-        (*thread).state = ThreadState::Waiting;
+        (*thread).set_state(ThreadState::Waiting);
 
         insert_wait_thread(thread);
         program_wait_ktimer();
@@ -570,7 +570,7 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), W
 
         remove_wait_thread(thread);
 
-        (*thread).state = ThreadState::Ready;
+        (*thread).set_state(ThreadState::Ready);
         reinsert_ktimer(ktimer_entity);
         program_wait_ktimer();
 
@@ -997,7 +997,7 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::RtThread;
+    use crate::thread::{RtThread, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
     use std::sync::Mutex;
     use std::vec::Vec;

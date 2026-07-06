@@ -24,7 +24,7 @@ pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
         if !is_idle_thread(thread) {
             (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
         }
-        (*thread).state = ThreadState::Running;
+        (*thread).set_state(ThreadState::Running);
         START_THREAD_PTR = thread;
         CURRENT_THREAD_IS_CFS = true;
         asm!("svc 0", options(noreturn));

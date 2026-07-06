@@ -64,14 +64,39 @@ impl ThreadSpawnError {
 
 /// Execution state for a scheduled thread.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     /// The thread is eligible to run when selected by the scheduler.
+    ///
+    /// Normal transitions:
+    /// - `Ready -> Running` when selected by the scheduler.
+    /// - `Ready -> Waiting` when moved to a wait queue before it runs.
     Ready,
     /// The thread is currently executing on the CPU.
+    ///
+    /// Normal transitions:
+    /// - `Running -> Ready` when preempted or voluntarily yielding.
+    /// - `Running -> Waiting` when sleeping or waiting for an event.
     Running,
     /// The thread cannot run until an external event or resource becomes ready.
+    ///
+    /// Normal transition:
+    /// - `Waiting -> Ready` when its wait condition expires or is satisfied.
+    ///
+    /// `Waiting -> Running` is deliberately not a scheduler transition; a
+    /// thread must become `Ready` before it can be selected to run.
     Waiting,
+}
+
+impl ThreadState {
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        match (self, next) {
+            (Self::Ready, Self::Ready | Self::Running | Self::Waiting) => true,
+            (Self::Running, Self::Ready | Self::Running | Self::Waiting) => true,
+            (Self::Waiting, Self::Ready | Self::Waiting) => true,
+            (Self::Waiting, Self::Running) => false,
+        }
+    }
 }
 
 /// 8-byte aligned stack storage for Cortex-M thread contexts.
@@ -128,6 +153,14 @@ pub struct ThreadCtx {
 }
 
 impl ThreadCtx {
+    pub(crate) fn set_state(&mut self, next: ThreadState) {
+        debug_assert!(
+            self.state.can_transition_to(next),
+            "invalid thread state transition"
+        );
+        self.state = next;
+    }
+
     /// Return the CFS scheduling entity for this thread, when this is a CFS thread.
     pub(crate) fn sched_entity(&self) -> Option<&SchedEntity> {
         if thread_is_cfs(self as *const ThreadCtx) {
@@ -755,6 +788,42 @@ mod tests {
         loop {
             core::hint::spin_loop();
         }
+    }
+
+    #[test]
+    fn thread_state_transition_matrix_documents_lifecycle() {
+        assert!(ThreadState::Ready.can_transition_to(ThreadState::Running));
+        assert!(ThreadState::Ready.can_transition_to(ThreadState::Waiting));
+        assert!(ThreadState::Running.can_transition_to(ThreadState::Ready));
+        assert!(ThreadState::Running.can_transition_to(ThreadState::Waiting));
+        assert!(ThreadState::Waiting.can_transition_to(ThreadState::Ready));
+
+        assert!(!ThreadState::Waiting.can_transition_to(ThreadState::Running));
+    }
+
+    #[test]
+    fn thread_context_helpers_follow_ready_running_waiting_ready_cycle() {
+        let mut cfs = cfs_thread("cfs", 1);
+
+        assert_eq!(cfs.thread.state, ThreadState::Ready);
+
+        cfs.thread.set_state(ThreadState::Running);
+        assert_eq!(cfs.thread.state, ThreadState::Running);
+
+        cfs.thread.set_state(ThreadState::Waiting);
+        assert_eq!(cfs.thread.state, ThreadState::Waiting);
+
+        cfs.thread.set_state(ThreadState::Ready);
+        assert_eq!(cfs.thread.state, ThreadState::Ready);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid thread state transition")]
+    fn waiting_thread_cannot_transition_directly_to_running() {
+        let mut cfs = cfs_thread("cfs", 1);
+
+        cfs.thread.set_state(ThreadState::Waiting);
+        cfs.thread.set_state(ThreadState::Running);
     }
 
     #[test]
