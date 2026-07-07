@@ -97,6 +97,15 @@ the timer is marked `inactive`.
 `deadline_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
 dispatch expiry in `SysTick` interrupt handler, `yieldyi`, wait timer programming in `msleepyi`.
 
+SysTick stores a reload register value rather than a direct interval. A reload
+value of `R` wraps after `R + 1` ticks, so an interval of `N` scheduler ticks is
+programmed as `N - 1`. The Cortex-M reload register is 24 bits wide and
+`rtsched` treats the writable reload range as `1..=0x00ff_ffff`. The raw
+conversion from ticks may produce reload value `0` for a one-tick interval, but
+scheduler programming writes `1` instead. When the next deadline is already due
+or farther away than the hardware can represent, scheduler programming uses the
+nearest writable SysTick reload value.
+
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
 `runtime`. The inactive RT timer is parked until the next `period_ticks` release.
 

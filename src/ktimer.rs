@@ -24,6 +24,7 @@ use crate::waitq::{
 };
 
 pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
+pub const CM_SYSTICK_RELOAD_MIN: u32 = 1;
 pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
 const KTIMER_DEADLINE_NEVER: u64 = u64::MAX;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
@@ -301,7 +302,11 @@ impl RtKTimer {
 
 /// Convert a raw tick interval into a SysTick reload register value.
 ///
-/// SysTick reload stores `ticks - 1`, and the register is 24 bits wide.
+/// SysTick stores a reload register value. A reload
+/// value of `R` wraps after `R + 1` ticks, so an interval of `N` ticks must be
+/// represented as `N - 1`. This helper returns the raw conversion and allows
+/// reload `0`; scheduler programming clamps reload `0` up to
+/// `CM_SYSTICK_RELOAD_MAX` before writing the hardware register.
 pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
     ticks
         .checked_sub(1)
@@ -781,20 +786,48 @@ unsafe fn yield_ktimer_in_queue(
     }
 }
 
+fn writable_reload(reload: u32) -> u32 {
+    reload.clamp(CM_SYSTICK_RELOAD_MIN, CM_SYSTICK_RELOAD_MAX)
+}
+
+fn programmable_reload_from_ticks(ticks: u32) -> u32 {
+    let reload =
+        reload_from_ticks(ticks).unwrap_or(if ticks == 0 { 0 } else { CM_SYSTICK_RELOAD_MAX });
+    writable_reload(reload)
+}
+
+unsafe fn systick_reload_for_entity(queue: &KTimerQueue, entity: *mut KTimerEntity) -> Option<u32> {
+    if entity.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let reload = if is_cfs_ktimer(entity) {
+            programmable_reload_from_ticks((*KTimerEntity::cfs_ktimer(entity)).execution_ticks())
+        } else {
+            let raw_reload = (*entity)
+                .deadline_at
+                .saturating_sub(queue.now_ticks())
+                .saturating_sub(1)
+                .min(u64::from(CM_SYSTICK_RELOAD_MAX)) as u32;
+            writable_reload(raw_reload)
+        };
+
+        Some(reload)
+    }
+}
+
+unsafe fn next_systick_reload(queue: &KTimerQueue) -> Option<u32> {
+    unsafe { systick_reload_for_entity(queue, queue.first()) }
+}
+
 pub(crate) fn program_next_systick() -> Option<u32> {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let entity = queue.first();
+        let reload = next_systick_reload(queue)?;
 
-        let reload = if is_cfs_ktimer(entity) {
-            (*KTimerEntity::cfs_ktimer(entity)).execution_ticks()
-        } else if is_wait_ktimer(entity) {
-            (*entity).remaining_at(queue.now_ticks())
-        } else {
-            (*entity).remaining_at(queue.now_ticks())
-        };
-
-        (*SYST::PTR).rvr.write(reload + 1);
+        debug_assert!((CM_SYSTICK_RELOAD_MIN..=CM_SYSTICK_RELOAD_MAX).contains(&reload));
+        (*SYST::PTR).rvr.write(reload);
         (*SYST::PTR).cvr.write(0);
 
         Some(reload)
@@ -893,6 +926,7 @@ impl KTimerQueue {
         self.now_ticks
     }
 
+    #[allow(dead_code)]
     pub fn next_deadline(&self) -> Option<u32> {
         let first = self.first();
         if first.is_null() {
@@ -903,7 +937,7 @@ impl KTimerQueue {
     }
 
     pub fn next_reload(&self) -> Option<u32> {
-        self.next_deadline().and_then(reload_from_ticks)
+        unsafe { next_systick_reload(self) }
     }
 
     pub fn advance_time(&mut self, elapsed: u32) {
@@ -1081,12 +1115,24 @@ mod tests {
     fn reload_from_ticks_converts_to_systick_reload() {
         assert_eq!(reload_from_ticks(0), None);
         assert_eq!(reload_from_ticks(1), Some(0));
+        assert_eq!(reload_from_ticks(2), Some(CM_SYSTICK_RELOAD_MIN));
         assert_eq!(reload_from_ticks(42), Some(41));
         assert_eq!(
             reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 1),
             Some(CM_SYSTICK_RELOAD_MAX)
         );
         assert_eq!(reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 2), None);
+    }
+
+    #[test]
+    fn writable_reload_clamps_raw_zero_to_minimum_reload() {
+        assert_eq!(writable_reload(0), CM_SYSTICK_RELOAD_MIN);
+        assert_eq!(
+            writable_reload(CM_SYSTICK_RELOAD_MAX + 1),
+            CM_SYSTICK_RELOAD_MAX
+        );
+        assert_eq!(programmable_reload_from_ticks(0), CM_SYSTICK_RELOAD_MIN);
+        assert_eq!(programmable_reload_from_ticks(1), CM_SYSTICK_RELOAD_MIN);
     }
 
     #[test]
@@ -1168,6 +1214,33 @@ mod tests {
             CM_SYSTICK_RELOAD_MAX
         );
         assert_eq!(collect_remaining(&queue), [0, 15, CM_SYSTICK_RELOAD_MAX]);
+    }
+
+    #[test]
+    fn next_reload_clamps_immediate_deadlines_to_minimum_reload() {
+        let mut queue = KTimerQueue::new();
+        let mut expired = KTimerEntity::new(0);
+
+        unsafe {
+            queue.insert(&mut expired);
+        }
+
+        assert_eq!(queue.next_deadline(), Some(0));
+        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MIN));
+    }
+
+    #[test]
+    fn next_reload_clamps_far_deadlines_to_maximum_reload() {
+        let mut queue = KTimerQueue::new();
+        let mut far = KTimerEntity::new(1);
+        far.set_deadline_at(u64::from(CM_SYSTICK_RELOAD_MAX) + 42);
+
+        unsafe {
+            queue.insert(&mut far);
+        }
+
+        assert_eq!(queue.next_deadline(), Some(CM_SYSTICK_RELOAD_MAX));
+        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
     }
 
     #[test]
