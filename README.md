@@ -14,6 +14,7 @@ The crate includes:
 - Thread spawn with a dedicated stack (`forkyi`).
 - Registered idle thread fallback when no normal CFS or RT work is runnable.
 - CPU resource yielding (`yieldyi`) to the next `active` scheduler timer/entity.
+- Lightweight scheduler tracing counters and callbacks.
 - Preemptive context switching support.
 - `SysTick` integration for advancing timers and requesting scheduler dispatch.
 
@@ -50,6 +51,20 @@ Normal transitions are `Ready -> Running`, `Running -> Ready`,
 `Running -> Waiting`, `Ready -> Waiting`, and `Waiting -> Ready`. A waiting
 thread must return to `Ready` before it can run again; `Waiting -> Running` is
 not a valid direct transition.
+
+## Scheduler Tracing
+
+Tracing hooks are available for scheduler event counters and optional callbacks:
+
+- `trace_counters()` returns saturating counters for context switches, RT
+  deadline misses, wakeups, and cooperative yields.
+- `reset_trace_counters()` resets those counters to zero.
+- `set_trace_fn(fn(TraceEvent))` registers a lightweight callback for each
+  traced event, and `clear_trace_fn()` removes it.
+
+Trace callbacks run from scheduler paths that may be inside a critical section
+or interrupt-triggered context switch path, so callbacks should stay short,
+non-blocking, and allocation-free.
 
 ## KTimer framework
 

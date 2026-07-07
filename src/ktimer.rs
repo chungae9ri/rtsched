@@ -403,6 +403,11 @@ unsafe fn record_rt_budget_overrun(entity: *mut KTimerEntity, rt_thread: *mut Rt
 
 unsafe fn record_rt_deadline_miss(entity: *mut KTimerEntity, rt_thread: *mut RtThread) {
     unsafe {
+        crate::trace::record_deadline_miss(
+            ptr::addr_of!((*rt_thread).thread),
+            (*rt_thread).runtime,
+            rt_relative_deadline_ticks(entity),
+        );
         crate::rtsched_println!(
             "Deadline miss in thread '{}': timer expired at relative deadline {} ticks (runtime {} ticks)",
             (*rt_thread).thread.name,
@@ -435,6 +440,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
             }
 
             (*wait_thread).set_state(ThreadState::Ready);
+            crate::trace::record_wakeup(wait_thread);
             if (*wait_thread).is_cfs {
                 enqueue_runq_from_waitq(wait_thread);
             } else {
@@ -571,6 +577,7 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), W
         remove_wait_thread(thread);
 
         (*thread).set_state(ThreadState::Ready);
+        crate::trace::record_wakeup(thread);
         reinsert_ktimer(ktimer_entity);
         program_wait_ktimer();
 

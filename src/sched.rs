@@ -68,6 +68,8 @@ unsafe fn switch_to_cfs_thread(next_thread: *mut ThreadCtx) {
             return;
         }
 
+        crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
+
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != next_thread
             && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
@@ -155,6 +157,7 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
                         if (*current_entity).vruntime > (*next_entity).vruntime {
+                            crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
                             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
                             (*next_thread).set_state(ThreadState::Running);
@@ -189,6 +192,7 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                     (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
                 }
             }
+            crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
             (*next_thread).set_state(ThreadState::Running);
             CURRENT_THREAD_CTX = next_thread;
             CURRENT_THREAD_IS_CFS = false;

@@ -107,6 +107,7 @@ mod rbtree;
 mod runq;
 mod sched;
 mod thread;
+mod trace;
 mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
@@ -136,6 +137,11 @@ pub use ktimer::{
 pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
 
 pub use sched::{handle_sched_tick, init_cfs, register_idle_thread, traverse_idle_thread_fn};
+
+pub use trace::{
+    TraceCounters, TraceEvent, TraceFn, TraceThread, clear_trace_fn, reset_trace_counters,
+    set_trace_fn, trace_counters,
+};
 
 pub use waitq::{WaitQueueError, traverse_wait_queue_fn};
 

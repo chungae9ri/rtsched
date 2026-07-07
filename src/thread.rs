@@ -712,6 +712,7 @@ pub fn yieldyi() {
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
         update_next_ktimer(next_ktimer);
 
+        crate::trace::record_yield(CURRENT_THREAD_CTX, elapsed);
         request_context_switch();
     });
 }
