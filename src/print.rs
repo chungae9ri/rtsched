@@ -41,11 +41,11 @@ macro_rules! rtsched_println {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use std::string::String;
     use std::sync::Mutex;
     use std::vec::Vec;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
     static PRINTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     fn capture_print(s: &str) {

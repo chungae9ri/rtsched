@@ -22,9 +22,7 @@ pub fn ticks_per_ms() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    use crate::TEST_LOCK;
 
     #[test]
     fn update_sys_clk_freq_updates_ticks_per_ms() {

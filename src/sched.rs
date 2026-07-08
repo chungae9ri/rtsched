@@ -94,6 +94,34 @@ unsafe fn switch_to_idle_thread() {
     }
 }
 
+unsafe fn requeue_current_cfs_thread_before_idle() {
+    unsafe {
+        if IDLE_THREAD_CTX.is_null()
+            || CURRENT_THREAD_CTX.is_null()
+            || !CURRENT_THREAD_IS_CFS
+            || is_idle_thread(CURRENT_THREAD_CTX)
+            || (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
+        {
+            return;
+        }
+
+        let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
+        debug_assert!(
+            !(*CFS_RUN_QUEUE.get()).contains(current_entity.cast_const()),
+            "running CFS thread is already queued"
+        );
+        (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+        (*CFS_RUN_QUEUE.get()).insert(current_entity);
+    }
+}
+
+unsafe fn switch_to_idle_thread_with_current_requeued() {
+    unsafe {
+        requeue_current_cfs_thread_before_idle();
+        switch_to_idle_thread();
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn schedule() {
     unsafe {
@@ -142,7 +170,9 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
         }
 
         if is_cfs_ktimer(next_ktimer) {
-            if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
+            if !(*next_ktimer).is_active() {
+                switch_to_idle_thread_with_current_requeued();
+            } else if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
                 let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
 
                 if CURRENT_THREAD_IS_CFS {
@@ -173,11 +203,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                     }
                     switch_to_cfs_thread(next_thread);
                 }
-            } else if CURRENT_THREAD_CTX.is_null()
-                || !CURRENT_THREAD_IS_CFS
-                || (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
-            {
-                switch_to_idle_thread();
+            } else {
+                switch_to_idle_thread_with_current_requeued();
             }
         } else {
             let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
@@ -232,12 +259,10 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::ktimer::{RtKTimer, init_ktimer_queue};
     use crate::thread::{CfsThread, RtThread};
     use crate::waitq::WaitEntity;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn cfs_thread(
         name: &'static str,
@@ -530,6 +555,68 @@ mod tests {
             assert!(CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
+        }
+    }
+
+    #[test]
+    fn cfs_timer_switches_from_current_cfs_to_idle_when_run_queue_is_empty() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut current = cfs_thread("current", 2, 0, ThreadState::Running);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            register_idle_thread(&mut idle.thread);
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
+
+            schedule_next(cfs_ktimer, 10);
+        }
+
+        assert!(idle.thread.state == ThreadState::Running);
+        assert!(current.thread.state == ThreadState::Ready);
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut current.sched_entity
+            ));
+            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), current.sched_entity.priority);
+        }
+    }
+
+    #[test]
+    fn inactive_cfs_timer_falls_back_to_idle_without_popping_queued_cfs_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut rt = rt_thread("rt");
+        let mut queued = cfs_thread("queued", 1, 0, ThreadState::Ready);
+
+        unsafe {
+            let cfs_ktimer = reset_sched_state();
+            (*cfs_ktimer).set_active(false);
+            register_idle_thread(&mut idle.thread);
+            CURRENT_THREAD_CTX = &mut rt.thread;
+            CURRENT_THREAD_IS_CFS = false;
+            queue_cfs_thread(&mut queued.thread);
+
+            schedule_next(cfs_ktimer, 0);
+        }
+
+        assert!(idle.thread.state == ThreadState::Running);
+        assert!(rt.thread.state == ThreadState::Ready);
+        assert!(queued.thread.state == ThreadState::Ready);
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut queued.sched_entity
+            ));
         }
     }
 

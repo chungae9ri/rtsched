@@ -202,12 +202,10 @@ pub(crate) unsafe fn remove_wait_thread(thread: *mut ThreadCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::runq::SchedEntity;
     use crate::thread::{CfsThread, ThreadState};
-    use std::sync::Mutex;
     use std::vec::Vec;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_wait_queue() {
         unsafe {

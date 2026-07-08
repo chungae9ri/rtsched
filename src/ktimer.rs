@@ -305,8 +305,8 @@ impl RtKTimer {
 /// SysTick stores a reload register value. A reload
 /// value of `R` wraps after `R + 1` ticks, so an interval of `N` ticks must be
 /// represented as `N - 1`. This helper returns the raw conversion and allows
-/// reload `0`; scheduler programming clamps reload `0` up to
-/// `CM_SYSTICK_RELOAD_MAX` before writing the hardware register.
+/// reload `0`; scheduler programming raises the reload value `0` to
+/// `CM_SYSTICK_RELOAD_MIN` before writing the hardware register.
 pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
     ticks
         .checked_sub(1)
@@ -1038,12 +1038,10 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::thread::{RtThread, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
-    use std::sync::Mutex;
     use std::vec::Vec;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn rt_thread(name: &'static str) -> RtThread {
         RtThread {
@@ -1241,6 +1239,48 @@ mod tests {
 
         assert_eq!(queue.next_deadline(), Some(CM_SYSTICK_RELOAD_MAX));
         assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+    }
+
+    #[test]
+    fn long_rt_deadline_is_dispatched_after_multiple_systick_chunks() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
+        let max_chunk_ticks = CM_SYSTICK_RELOAD_MAX + 1;
+        let long_deadline = u64::from(max_chunk_ticks) * 2 + 5;
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            ktimer.entity.set_deadline_at(long_deadline);
+            queue.insert(ktimer.entity_mut());
+        }
+
+        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+
+        queue.advance_time(max_chunk_ticks);
+        let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(queue.now_ticks(), u64::from(max_chunk_ticks));
+        assert_eq!(ktimer.entity.deadline_at(), long_deadline);
+        assert_eq!(ktimer.entity.miss_cnt, 0);
+        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+
+        queue.advance_time(max_chunk_ticks);
+        let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(queue.now_ticks(), u64::from(max_chunk_ticks) * 2);
+        assert_eq!(ktimer.entity.deadline_at(), long_deadline);
+        assert_eq!(ktimer.entity.miss_cnt, 0);
+        assert_eq!(queue.next_reload(), Some(4));
+
+        queue.advance_time(5);
+        let next = unsafe { queue.dispatch_expired(5) };
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(queue.now_ticks(), long_deadline);
+        assert_eq!(ktimer.entity.miss_cnt, 1);
+        assert_eq!(ktimer.entity.deadline_at(), long_deadline + 50);
     }
 
     #[test]

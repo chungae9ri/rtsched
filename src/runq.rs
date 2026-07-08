@@ -363,13 +363,11 @@ pub fn dequeue_cfs_thread_to_waitq(thread: &mut CfsThread) -> Result<(), WaitQue
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::ktimer::init_ktimer_queue;
     use crate::thread::{CfsThread, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, wait_entity};
-    use std::sync::Mutex;
     use std::vec::Vec;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn reset_run_queue() {
         unsafe {

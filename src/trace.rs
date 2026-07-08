@@ -171,11 +171,11 @@ fn emit(event: TraceEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::thread::ThreadState;
     use std::sync::Mutex;
     use std::vec::Vec;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
     static EVENTS: Mutex<Vec<TraceEvent>> = Mutex::new(Vec::new());
 
     fn capture_event(event: TraceEvent) {

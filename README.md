@@ -104,7 +104,10 @@ programmed as `N - 1`. The Cortex-M reload register is 24 bits wide and
 conversion from ticks may produce reload value `0` for a one-tick interval, but
 scheduler programming writes `1` instead. When the next deadline is already due
 or farther away than the hardware can represent, scheduler programming uses the
-nearest writable SysTick reload value.
+nearest writable SysTick reload value. Long deadlines remain stored as absolute
+`u64` tick values; each SysTick interrupt advances the timer queue by the
+programmed chunk and the scheduler reprograms the next chunk until the absolute
+deadline is reached.
 
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
 `runtime`. The inactive RT timer is parked until the next `period_ticks` release.
@@ -162,6 +165,19 @@ deadline.
 relative deadline, and budget all use the same tick value. Use
 `RtKTimer::new_with_timing(RtTiming::new(period_ticks, relative_deadline_ticks,
 budget_ticks), ...)` when those meanings differ.
+
+## `cpu_idle` Thread for Power Saving
+
+Board code can register a CFS thread as the idle thread with `register_idle_thread()`.
+The idle thread is removed from the normal CFS run queue and is selected only as a scheduler fallback.
+
+The scheduler selects `cpu_idle` when no RT timer is selected to run and either:
+
+- the CFS ktimer is inactive, meaning the current CFS execution window is closed
+- the CFS run queue is empty, meaning all normal CFS threads are waiting or no
+  normal CFS thread has been spawned
+
+Application code can put low-power behavior such as `wfi` in the idle thread.
 
 ## Example of scheduling
 
