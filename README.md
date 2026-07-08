@@ -104,7 +104,10 @@ programmed as `N - 1`. The Cortex-M reload register is 24 bits wide and
 conversion from ticks may produce reload value `0` for a one-tick interval, but
 scheduler programming writes `1` instead. When the next deadline is already due
 or farther away than the hardware can represent, scheduler programming uses the
-nearest writable SysTick reload value.
+nearest writable SysTick reload value. Long deadlines remain stored as absolute
+`u64` tick values; each SysTick interrupt advances the timer queue by the
+programmed chunk and the scheduler reprograms the next chunk until the absolute
+deadline is reached.
 
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
 `runtime`. The inactive RT timer is parked until the next `period_ticks` release.
