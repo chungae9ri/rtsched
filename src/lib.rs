@@ -16,6 +16,9 @@ thread_local! {
 #[cfg(all(not(target_arch = "arm"), test))]
 static HOST_CRITICAL_SECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(all(not(target_arch = "arm"), test))]
 struct HostCriticalSectionDepth;
 

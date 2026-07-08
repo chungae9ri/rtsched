@@ -1038,12 +1038,10 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::thread::{RtThread, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
-    use std::sync::Mutex;
     use std::vec::Vec;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn rt_thread(name: &'static str) -> RtThread {
         RtThread {

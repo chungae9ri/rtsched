@@ -749,10 +749,8 @@ pub fn msleepyi(msec: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::ktimer::{KTimerEntity, RtKTimer, init_ktimer_queue};
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
         CfsThread {

@@ -259,12 +259,10 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TEST_LOCK;
     use crate::ktimer::{RtKTimer, init_ktimer_queue};
     use crate::thread::{CfsThread, RtThread};
     use crate::waitq::WaitEntity;
-    use std::sync::Mutex;
-
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn cfs_thread(
         name: &'static str,
