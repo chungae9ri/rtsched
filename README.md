@@ -166,6 +166,19 @@ relative deadline, and budget all use the same tick value. Use
 `RtKTimer::new_with_timing(RtTiming::new(period_ticks, relative_deadline_ticks,
 budget_ticks), ...)` when those meanings differ.
 
+## `cpu_idle` Thread for Power Saving
+
+Board code can register a CFS thread as the idle thread with `register_idle_thread()`.
+The idle thread is removed from the normal CFS run queue and is selected only as a scheduler fallback.
+
+The scheduler selects `cpu_idle` when no RT timer is selected to run and either:
+
+- the CFS ktimer is inactive, meaning the current CFS execution window is closed
+- the CFS run queue is empty, meaning all normal CFS threads are waiting or no
+  normal CFS thread has been spawned
+
+Application code can put low-power behavior such as `wfi` in the idle thread.
+
 ## Example of scheduling
 
 C: runtime needed to finish one job
