@@ -127,6 +127,7 @@ extern "C" fn schedule() {
     unsafe {
         let next_ktimer = next_ktimer();
         if next_ktimer.is_null() {
+            switch_to_idle_thread_with_current_requeued();
             program_next_systick();
             return;
         }
@@ -138,10 +139,6 @@ extern "C" fn schedule() {
 
 unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
     unsafe {
-        if next_ktimer.is_null() {
-            return;
-        }
-
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
         //   ticks and its inverse-numeric priority. Lower numeric priority values are
@@ -674,6 +671,36 @@ mod tests {
             assert!(!CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
+        }
+    }
+
+    #[test]
+    fn idle_fallback_requeues_current_cfs_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut current = cfs_thread("current", 2, 0, ThreadState::Running);
+
+        unsafe {
+            let _ = reset_sched_state();
+            register_idle_thread(&mut idle.thread);
+            CURRENT_THREAD_CTX = &mut current.thread;
+            CURRENT_THREAD_IS_CFS = true;
+            *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
+
+            switch_to_idle_thread_with_current_requeued();
+        }
+
+        assert!(idle.thread.state == ThreadState::Running);
+        assert!(current.thread.state == ThreadState::Ready);
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(ptr::eq(
+                (*CFS_RUN_QUEUE.get()).first(),
+                &mut current.sched_entity
+            ));
+            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), current.sched_entity.priority);
         }
     }
 
