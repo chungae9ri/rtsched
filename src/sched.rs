@@ -3,7 +3,7 @@
 
 use core::ptr;
 
-use crate::arch::ctx_swtich::request_context_switch;
+use crate::arch::cm::ctx_switch::request_context_switch;
 use crate::ktimer::{
     CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,

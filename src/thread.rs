@@ -9,7 +9,7 @@ use core::mem::offset_of;
 use core::ptr;
 use core::ptr::NonNull;
 
-use crate::arch::ctx_swtich::request_context_switch;
+use crate::arch::cm::ctx_switch::request_context_switch;
 use crate::clock::ticks_per_ms;
 use crate::critical_section;
 use crate::ktimer::{
