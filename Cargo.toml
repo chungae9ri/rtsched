@@ -9,5 +9,39 @@ license = "MIT"
 name = "rtsched"
 bench = false
 
+[features]
+embedded-examples = []
+
 [dependencies]
 cortex-m = "0.7.7"
+
+[dev-dependencies]
+cortex-m-rt = "0.6.15"
+
+[[example]]
+name = "minimal_cfs"
+path = "examples/minimal_cfs.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
+
+[[example]]
+name = "minimal_rt"
+path = "examples/minimal_rt.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
+
+[[example]]
+name = "mixed_rt_cfs"
+path = "examples/mixed_rt_cfs.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
+
+[[example]]
+name = "sleep_wake"
+path = "examples/sleep_wake.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]

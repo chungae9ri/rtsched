@@ -1618,6 +1618,32 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_expired_active_rt_timer_uses_relative_deadline() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer =
+            RtKTimer::new_with_timing(RtTiming::new(100, 40, 20), ptr::null_mut(), "rt");
+
+        unsafe {
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            rt.runtime = 45;
+            ktimer.entity.set_deadline_at(100);
+            queue.insert(ktimer.entity_mut());
+        }
+
+        queue.advance_time(100);
+        let next = unsafe { queue.dispatch_expired(100) };
+
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert_eq!(ktimer.entity.miss_cnt, 1);
+        assert_eq!(rt.runtime, 0);
+        assert!(ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.deadline_at(), 140);
+    }
+
+    #[test]
     fn dispatch_expired_inactive_rt_timer_reactivates_without_miss() {
         let _guard = TEST_LOCK.lock().unwrap();
 
