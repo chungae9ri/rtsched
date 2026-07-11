@@ -1,5 +1,42 @@
 #![cfg_attr(not(test), no_std)]
 
+//! Runtime scheduler primitives for `no_std` embedded applications.
+//!
+//! `rtsched` provides the core pieces needed to create, queue, block, wake, and
+//! context-switch application threads on a single microcontroller core. It
+//! combines CFS-style background scheduling with soft real-time scheduling built
+//! on kernel timers ordered by deadline.
+//!
+//! Board crates own the hardware setup: clocks, timer interrupts,
+//! architecture-specific context-switch entry points, stack storage, and
+//! concrete thread storage. A typical board initializes the timer queue with
+//! [`init_ktimer_queue`], configures CFS with [`init_cfs`], creates
+//! [`CfsThread`] and [`RtThread`] values with their builders, registers an idle
+//! CFS thread with [`register_idle_thread`], and starts execution with
+//! [`spawn_main_thread`].
+//!
+//! The crate is `no_std` for embedded builds. Host-only test support provides
+//! scheduler state serialization so the same core data structures can be
+//! exercised by unit tests.
+//!
+//! # Scheduling Model
+//!
+//! - [`CfsThread`] uses a red-black-tree run queue ordered by virtual runtime.
+//! - [`RtThread`] uses an [`RtKTimer`] entry for deadline-based scheduling.
+//! - Waiting threads move through a wait queue and can be resumed by timer
+//!   expiry or scheduler wake-up paths.
+//! - [`handle_sched_tick`] advances timers and requests dispatch from the
+//!   target-specific context-switch path.
+//!
+//! # Safety
+//!
+//! This crate exposes low-level scheduler entry points that operate on raw
+//! pointers, intrusive queue links, global scheduler state, and
+//! architecture-specific stack frames. Public `unsafe` functions document their
+//! caller obligations individually. Board code must ensure thread and stack
+//! storage outlives all scheduler use and that initialization happens before
+//! scheduler interrupts can observe the global state.
+//!
 /// Crate version taken from Cargo metadata at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -70,6 +107,12 @@ mod arch {
         pub mod ctx_switch {
             use crate::thread::ThreadCtx;
 
+            /// Stub for starting the first scheduler thread on non-Cortex-M targets.
+            ///
+            /// # Safety
+            ///
+            /// This function is only implemented for Cortex-M targets. Calling
+            /// the host stub always panics.
             pub unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
                 panic!("spawn_main_thread is only available on Cortex-M targets")
             }

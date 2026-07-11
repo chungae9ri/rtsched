@@ -317,14 +317,14 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
         // Update cfs_rq with priority_sum
         let mut updated = RBTree::new();
 
-        while let Some(entity) = tree.pop_first() {
+        while let Some(queued_entity) = tree.pop_first() {
             let priority_sum = *CFS_RUN_QUEUE.priority_sum();
-            let priority = (*entity).priority;
+            let priority = queued_entity.priority;
 
-            (*entity).sched_tick_cnt =
-                cfs_sched_ticks_from_vruntime((*entity).vruntime, priority, priority_sum);
+            queued_entity.sched_tick_cnt =
+                cfs_sched_ticks_from_vruntime(queued_entity.vruntime, priority, priority_sum);
 
-            updated.insert(entity);
+            updated.insert(queued_entity);
         }
 
         *tree = updated;

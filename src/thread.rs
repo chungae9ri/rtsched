@@ -506,7 +506,7 @@ fn validate_stack<const N: usize>(stack: *mut AlignedStack<N>) -> Result<(), Thr
     }
 
     let top = unsafe { (*stack).0.as_ptr().wrapping_add(N) };
-    if top as usize % THREAD_STACK_ALIGNMENT != 0 {
+    if (top as usize) & (THREAD_STACK_ALIGNMENT - 1) != 0 {
         return Err(ThreadSpawnError::UnalignedStackTop);
     }
 
@@ -1015,10 +1015,7 @@ mod tests {
 
         unsafe {
             let entity = cfs_sched_entity(&mut cfs.thread);
-            assert!(ptr::eq(
-                thread_from_cfs_sched_entity(entity),
-                &mut cfs.thread
-            ));
+            assert!(ptr::eq(thread_from_cfs_sched_entity(entity), &cfs.thread));
         }
     }
 
@@ -1044,11 +1041,11 @@ mod tests {
         unsafe {
             assert!(ptr::eq(
                 thread_from_wait_entity(cfs_wait_entity(&mut cfs.thread)),
-                &mut cfs.thread
+                &cfs.thread
             ));
             assert!(ptr::eq(
                 thread_from_wait_entity(rt_wait_entity(&mut rt.thread)),
-                &mut rt.thread
+                &rt.thread
             ));
         }
     }
@@ -1067,11 +1064,11 @@ mod tests {
             CURRENT_THREAD_IS_CFS = false;
 
             set_rt_ktimer_entity(&mut rt.thread, &mut ktimer);
-            assert!(ptr::eq(rt_ktimer_entity(&mut rt.thread), &mut ktimer));
-            assert!(ptr::eq(rt_thread_from_thread_ctx(&mut rt.thread), &mut rt));
+            assert!(ptr::eq(rt_ktimer_entity(&mut rt.thread), &ktimer));
+            assert!(ptr::eq(rt_thread_from_thread_ctx(&mut rt.thread), &rt));
         }
 
-        assert!(ptr::eq(rt.ktimer_entity().unwrap().as_ptr(), &mut ktimer));
+        assert!(ptr::eq(rt.ktimer_entity().unwrap().as_ptr(), &ktimer));
         assert!(set_rt_thread_start_time(42));
         assert_eq!(rt.runtime, 42);
 
