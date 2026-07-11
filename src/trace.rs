@@ -196,17 +196,17 @@ mod tests {
     #[test]
     fn trace_records_counters_and_callback_events() {
         let _guard = TEST_LOCK.lock().unwrap();
-        let mut from = thread(1, "from", true);
-        let mut to = thread(2, "to", false);
+        let from = thread(1, "from", true);
+        let to = thread(2, "to", false);
 
         EVENTS.lock().unwrap().clear();
         reset_trace_counters();
         set_trace_fn(capture_event);
 
-        record_context_switch(&mut from, &mut to);
-        record_deadline_miss(&mut to, 37, 40);
-        record_wakeup(&mut from);
-        record_yield(&mut to, 5);
+        record_context_switch(&from, &to);
+        record_deadline_miss(&to, 37, 40);
+        record_wakeup(&from);
+        record_yield(&to, 5);
 
         clear_trace_fn();
 

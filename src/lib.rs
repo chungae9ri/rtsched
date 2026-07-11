@@ -70,6 +70,12 @@ mod arch {
         pub mod ctx_switch {
             use crate::thread::ThreadCtx;
 
+            /// Stub for starting the first scheduler thread on non-Cortex-M targets.
+            ///
+            /// # Safety
+            ///
+            /// This function is only implemented for Cortex-M targets. Calling
+            /// the host stub always panics.
             pub unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
                 panic!("spawn_main_thread is only available on Cortex-M targets")
             }
