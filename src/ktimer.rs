@@ -313,6 +313,13 @@ pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
         .filter(|&reload| reload <= CM_SYSTICK_RELOAD_MAX)
 }
 
+/// Initialize the global ktimer and wait-timer state.
+///
+/// # Safety
+///
+/// Call this during single-threaded scheduler setup, before interrupts or
+/// threads can access the ktimer queue. Reinitializing while queued timer
+/// entities are still in use invalidates the intrusive queue links.
 pub unsafe fn init_ktimer_queue() {
     critical_section(|| unsafe {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
@@ -1299,7 +1306,7 @@ mod tests {
             queue.insert(&mut inactive_middle);
         }
 
-        assert!(ptr::eq(queue.first_active(), &mut active_late));
+        assert!(ptr::eq(queue.first_active(), &active_late));
     }
 
     #[test]
@@ -1324,7 +1331,7 @@ mod tests {
 
         assert_eq!(collect_deadlines_at(&queue), [5, 10, 30, 40, 50]);
         assert_eq!(collect_active_deadlines_at(&queue), [10, 30, 50]);
-        assert!(ptr::eq(queue.first_active(), &mut active_first));
+        assert!(ptr::eq(queue.first_active(), &active_first));
     }
 
     #[test]
@@ -1344,7 +1351,7 @@ mod tests {
 
         let removed = unsafe { queue.remove(&mut timers[1]) };
 
-        assert!(ptr::eq(removed, &mut timers[1]));
+        assert!(ptr::eq(removed, &timers[1]));
         assert!(!timers[1].is_linked());
         assert_eq!(queue.len(), 2);
         assert_eq!(collect_deadlines_at(&queue), [8, 12]);
@@ -1405,7 +1412,7 @@ mod tests {
             queue.insert(&mut active_later);
 
             let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 20, false);
-            assert!(ptr::eq(next, &mut active_later));
+            assert!(ptr::eq(next, &active_later));
         }
 
         assert_eq!(rt.runtime, 20);
@@ -1430,7 +1437,7 @@ mod tests {
             queue.insert(&mut active_later);
 
             let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
-            assert!(ptr::eq(next, &mut active_later));
+            assert!(ptr::eq(next, &active_later));
         }
 
         assert_eq!(rt.runtime, 0);
@@ -1456,7 +1463,7 @@ mod tests {
             queue.insert(&mut active_later);
 
             let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, false);
-            assert!(ptr::eq(next, &mut active_later));
+            assert!(ptr::eq(next, &active_later));
         }
 
         assert_eq!(rt.runtime, 15);
@@ -1483,7 +1490,7 @@ mod tests {
             queue.insert(&mut active_later);
 
             let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, false);
-            assert!(ptr::eq(next, &mut active_later));
+            assert!(ptr::eq(next, &active_later));
         }
 
         assert_eq!(rt.runtime, 15);

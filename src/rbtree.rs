@@ -773,7 +773,7 @@ mod tests {
 
         let removed = unsafe { tree.remove(&mut entities[1]) };
 
-        assert!(ptr::eq(removed, &mut entities[1]));
+        assert!(ptr::eq(removed, &entities[1]));
         assert!(!entities[1].node.is_linked());
         assert_eq!(tree.len(), 6);
         assert_eq!(collect_keys(&tree), [2, 6, 10, 12, 14, 16]);

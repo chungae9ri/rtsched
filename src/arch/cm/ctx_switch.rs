@@ -19,6 +19,13 @@ static mut START_THREAD_PTR: *mut ThreadCtx = ptr::null_mut();
 /// same synthetic frame layout produced by `forkyi`. The actual exception
 /// return happens in `SVCall`, because `EXC_RETURN` is only valid from
 /// handler mode.
+///
+/// # Safety
+///
+/// `thread` must be a non-null pointer to a live `ThreadCtx` initialized by
+/// `forkyi` or a thread builder, and its stack storage must remain valid for
+/// the lifetime of the running thread. Call this only once the scheduler queues
+/// have been initialized and no other thread is currently running.
 pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
     unsafe {
         if !is_idle_thread(thread) {

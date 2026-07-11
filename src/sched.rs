@@ -21,6 +21,13 @@ pub(crate) static mut IDLE_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 ///
 /// `ticks` is expressed in raw timer ticks because the board owns the clock
 /// configuration.
+///
+/// # Safety
+///
+/// Call this during single-threaded scheduler setup after `init_ktimer_queue`
+/// and before scheduler interrupts or threads can observe the global CFS state.
+/// Reinitializing while CFS entities are queued invalidates their intrusive
+/// queue links.
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
         init_cfs_rq();
@@ -37,6 +44,13 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
 /// The idle thread is deliberately removed from the CFS run queue so it does
 /// not participate in fairness accounting. It is selected only as a scheduler
 /// fallback.
+///
+/// # Safety
+///
+/// `thread` must point to a live CFS `ThreadCtx` created by a thread builder,
+/// and its backing storage and stack must outlive all scheduler use. Call this
+/// only after the CFS run queue has been initialized and while scheduler state
+/// is not being concurrently modified.
 pub unsafe fn register_idle_thread(thread: *mut ThreadCtx) {
     crate::critical_section(|| unsafe {
         assert!(!thread.is_null(), "idle thread must be non-null");
@@ -173,9 +187,9 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                 let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
 
                 if CURRENT_THREAD_IS_CFS {
-                    if (*CURRENT_THREAD_CTX).state == ThreadState::Waiting {
-                        switch_to_cfs_thread(next_thread);
-                    } else if is_idle_thread(CURRENT_THREAD_CTX) {
+                    if (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
+                        || is_idle_thread(CURRENT_THREAD_CTX)
+                    {
                         switch_to_cfs_thread(next_thread);
                     } else {
                         let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
@@ -183,7 +197,7 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                             CURRENT_THREAD_CTX != next_thread,
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
-                        if (*current_entity).vruntime > (*next_entity).vruntime {
+                        if (*current_entity).vruntime > next_entity.vruntime {
                             crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
                             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
@@ -396,11 +410,11 @@ mod tests {
             1
         );
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut queued.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &queued.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut current.sched_entity
+                &current.sched_entity
             ));
         }
     }
@@ -430,11 +444,11 @@ mod tests {
             1
         );
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut current.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &current.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut queued.sched_entity
+                &queued.sched_entity
             ));
             assert!(!current.sched_entity.is_linked());
         }
@@ -465,12 +479,9 @@ mod tests {
             1
         );
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut second.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &second.thread));
             assert!(CURRENT_THREAD_IS_CFS);
-            assert!(ptr::eq(
-                (*CFS_RUN_QUEUE.get()).first(),
-                &mut first.sched_entity
-            ));
+            assert!(ptr::eq((*CFS_RUN_QUEUE.get()).first(), &first.sched_entity));
         }
     }
 
@@ -499,11 +510,11 @@ mod tests {
             1
         );
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut rt.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &rt.thread));
             assert!(!CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut current.sched_entity
+                &current.sched_entity
             ));
         }
     }
@@ -522,7 +533,7 @@ mod tests {
         }
 
         unsafe {
-            assert!(ptr::eq(IDLE_THREAD_CTX, &mut idle.thread));
+            assert!(ptr::eq(IDLE_THREAD_CTX, &idle.thread));
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
             assert!(idle.thread.state == ThreadState::Ready);
@@ -548,7 +559,7 @@ mod tests {
         assert!(idle.thread.state == ThreadState::Running);
         assert!(rt.thread.state == ThreadState::Ready);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
@@ -575,11 +586,11 @@ mod tests {
         assert!(idle.thread.state == ThreadState::Running);
         assert!(current.thread.state == ThreadState::Ready);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut current.sched_entity
+                &current.sched_entity
             ));
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), current.sched_entity.priority);
         }
@@ -608,11 +619,11 @@ mod tests {
         assert!(rt.thread.state == ThreadState::Ready);
         assert!(queued.thread.state == ThreadState::Ready);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut queued.sched_entity
+                &queued.sched_entity
             ));
         }
     }
@@ -638,7 +649,7 @@ mod tests {
         assert!(idle.thread.state == ThreadState::Ready);
         assert!(queued.thread.state == ThreadState::Running);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut queued.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &queued.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), queued.sched_entity.priority);
@@ -667,7 +678,7 @@ mod tests {
         assert!(idle.thread.state == ThreadState::Ready);
         assert!(rt.thread.state == ThreadState::Running);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut rt.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &rt.thread));
             assert!(!CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
@@ -694,11 +705,11 @@ mod tests {
         assert!(idle.thread.state == ThreadState::Running);
         assert!(current.thread.state == ThreadState::Ready);
         unsafe {
-            assert!(ptr::eq(CURRENT_THREAD_CTX, &mut idle.thread));
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
             assert!(CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
-                &mut current.sched_entity
+                &current.sched_entity
             ));
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), current.sched_entity.priority);
         }

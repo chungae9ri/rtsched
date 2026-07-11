@@ -328,7 +328,7 @@ mod tests {
         }
 
         let popped = unsafe { pop_expired_wait_thread(0) };
-        assert!(ptr::eq(popped, &mut expired.thread));
+        assert!(ptr::eq(popped, &expired.thread));
         assert_eq!(unsafe { pop_expired_wait_thread(0) }, ptr::null_mut());
         assert_eq!(collect_wake_at(), [4]);
     }

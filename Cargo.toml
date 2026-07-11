@@ -3,7 +3,20 @@ name = "rtsched"
 version = "0.1.0"
 authors = ["Kwangdo Yi <kwangdo.yi@gmail.com>"]
 edition = "2024"
+rust-version = "1.85"
+description = "A no_std runtime scheduler for Cortex-M thread management"
 license = "MIT"
+repository = "https://github.com/chungae9ri/rtsched"
+documentation = "https://docs.rs/rtsched"
+keywords = ["scheduler", "embedded", "cortex-m", "no-std", "rtos"]
+categories = ["embedded", "no-std", "os"]
+include = [
+    "/Cargo.toml",
+    "/LICENSE",
+    "/README.md",
+    "/examples/**",
+    "/src/**",
+]
 
 [lib]
 name = "rtsched"
