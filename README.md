@@ -2,9 +2,11 @@
 
 `rtsched` is a runtime scheduler crate for thread management. It provides
 the core pieces needed to create and switch between application threads on a
-single microcontroller core. The library depends on `cortex-m` for architecture
-support; the embedded examples additionally use `cortex-m-rt` for startup,
-exception entry points, and linker/runtime support.
+single microcontroller core. The architecture-specific layer currently targets
+Cortex-M through `cortex-m` crate. That code is isolated under `src/arch/cm`,
+so additional architecture backends can be added under `src/arch`. The embedded
+examples additionally use `cortex-m-rt` for startup, exception entry points,
+and linker/runtime support.
 
 The crate includes:
 
