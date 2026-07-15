@@ -7,7 +7,10 @@ use core::ptr;
 
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::thread::{ThreadCtx, cfs_wait_entity, rt_wait_entity, thread_from_wait_entity};
+use crate::thread::{
+    ThreadCtx, ThreadRef, cfs_wait_entity, rt_wait_entity, thread_from_wait_entity,
+    thread_ref_from_thread_ctx,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WaitQueueError {
@@ -142,12 +145,12 @@ pub(crate) unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Opti
 /// Visit waiting threads without exposing raw traversal cursors.
 pub fn traverse_wait_queue_fn<F>(mut f: F)
 where
-    F: FnMut(&ThreadCtx),
+    F: for<'a> FnMut(ThreadRef<'a>),
 {
     critical_section(|| unsafe {
         let mut cursor = traverse_wait_queue(None);
         while let Some(thread) = cursor {
-            f(&*thread);
+            f(thread_ref_from_thread_ctx(thread));
             cursor = traverse_wait_queue(Some(thread));
         }
     });
@@ -278,7 +281,7 @@ mod tests {
 
         assert_eq!(collect_wake_at(), [5, 10, 10]);
         let mut names = Vec::new();
-        traverse_wait_queue_fn(|thread| names.push(thread.name));
+        traverse_wait_queue_fn(|thread| names.push(thread.thread_ctx().name));
         assert_eq!(names, ["second", "third", "first"]);
         let first_thread = unsafe { traverse_wait_queue(None).unwrap() };
         let second_thread = unsafe { traverse_wait_queue(Some(first_thread)).unwrap() };

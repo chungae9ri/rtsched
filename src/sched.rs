@@ -10,7 +10,10 @@ use crate::ktimer::{
     program_next_systick, update_next_ktimer,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
-use crate::thread::{ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity};
+use crate::thread::{
+    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
+    thread_from_cfs_sched_entity,
+};
 
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
@@ -67,11 +70,11 @@ pub(crate) unsafe fn is_idle_thread(thread: *const ThreadCtx) -> bool {
 
 pub fn traverse_idle_thread_fn<F>(mut f: F)
 where
-    F: FnMut(&ThreadCtx),
+    F: FnMut(&CfsThread),
 {
     crate::critical_section(|| unsafe {
         if !IDLE_THREAD_CTX.is_null() {
-            f(&*IDLE_THREAD_CTX);
+            f(&*cfs_thread_from_thread_ctx(IDLE_THREAD_CTX));
         }
     });
 }
@@ -728,7 +731,7 @@ mod tests {
         }
 
         traverse_idle_thread_fn(|thread| {
-            seen = thread as *const ThreadCtx;
+            seen = thread.thread_ctx() as *const ThreadCtx;
         });
 
         assert!(ptr::eq(seen, &idle.thread));

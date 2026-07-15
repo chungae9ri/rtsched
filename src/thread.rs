@@ -17,7 +17,7 @@ use crate::ktimer::{
     elapsed_ticks_since_current_reload, enqueue_ktimer, ktimer_now_ticks, update_next_ktimer,
     yield_ktimer,
 };
-use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread, thread_is_cfs};
+use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::waitq::WaitEntity;
 
@@ -160,41 +160,6 @@ impl ThreadCtx {
         );
         self.state = next;
     }
-
-    /// Return the CFS scheduling entity for this thread, when this is a CFS thread.
-    pub(crate) fn sched_entity(&self) -> Option<&SchedEntity> {
-        if thread_is_cfs(self as *const ThreadCtx) {
-            Some(unsafe { &*cfs_sched_entity(self as *const ThreadCtx as *mut ThreadCtx) })
-        } else {
-            None
-        }
-    }
-
-    /// Return a copy of CFS scheduling metrics, when this is a CFS thread.
-    pub fn sched_info(&self) -> Option<SchedInfo> {
-        self.sched_entity().map(|entity| SchedInfo {
-            priority: entity.priority,
-            sched_tick_cnt: entity.sched_tick_cnt(),
-            vruntime: entity.vruntime(),
-        })
-    }
-
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
-        unsafe {
-            let thread = self as *const ThreadCtx as *mut ThreadCtx;
-            let entity = if self.is_cfs {
-                cfs_wait_entity(thread)
-            } else {
-                rt_wait_entity(thread)
-            };
-
-            (
-                (*entity).remaining_at(ktimer_now_ticks()),
-                (*entity).waitevt,
-            )
-        }
-    }
 }
 
 /// Thread control block for CFS-scheduled threads.
@@ -216,6 +181,26 @@ impl CfsThread {
 
     pub fn thread_ctx_mut(&mut self) -> &mut ThreadCtx {
         &mut self.thread
+    }
+
+    /// Return this thread's CFS scheduling entity.
+    pub(crate) fn sched_entity(&self) -> &SchedEntity {
+        &self.sched_entity
+    }
+
+    /// Return a copy of this CFS thread's scheduling metrics.
+    pub fn sched_info(&self) -> SchedInfo {
+        let entity = self.sched_entity();
+        SchedInfo {
+            priority: entity.priority,
+            sched_tick_cnt: entity.sched_tick_cnt(),
+            vruntime: entity.vruntime(),
+        }
+    }
+
+    /// Return this thread's remaining wait ticks and wait event.
+    pub fn wait_info(&self) -> (u32, u32) {
+        wait_info_from_entity(&self.wait_entity)
     }
 }
 
@@ -259,6 +244,30 @@ impl RtThread {
     pub fn runtime(&self) -> u32 {
         self.runtime
     }
+
+    /// Return this thread's remaining wait ticks and wait event.
+    pub fn wait_info(&self) -> (u32, u32) {
+        wait_info_from_entity(&self.wait_entity)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ThreadRef<'a> {
+    Cfs(&'a CfsThread),
+    Rt(&'a RtThread),
+}
+
+impl ThreadRef<'_> {
+    pub fn thread_ctx(&self) -> &ThreadCtx {
+        match self {
+            Self::Cfs(thread) => thread.thread_ctx(),
+            Self::Rt(thread) => thread.thread_ctx(),
+        }
+    }
+}
+
+fn wait_info_from_entity(entity: &WaitEntity) -> (u32, u32) {
+    (entity.remaining_at(ktimer_now_ticks()), entity.waitevt)
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -584,14 +593,21 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     }
 }
 
+pub(crate) unsafe fn cfs_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut CfsThread {
+    debug_assert!(!thread.is_null());
+
+    (thread as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, thread))
+        .cast::<CfsThread>()
+}
+
 pub(crate) unsafe fn cfs_sched_entity(thread: *mut ThreadCtx) -> *mut SchedEntity {
     debug_assert!(!thread.is_null());
 
-    let cfs_thread = (thread as *mut u8)
-        .wrapping_sub(offset_of!(CfsThread, thread))
-        .cast::<CfsThread>();
-
-    unsafe { ptr::addr_of_mut!((*cfs_thread).sched_entity) }
+    unsafe {
+        let cfs_thread = cfs_thread_from_thread_ctx(thread);
+        ptr::addr_of_mut!((*cfs_thread).sched_entity)
+    }
 }
 
 pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *mut ThreadCtx {
@@ -670,6 +686,18 @@ pub(crate) unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut R
     (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>()
+}
+
+pub(crate) unsafe fn thread_ref_from_thread_ctx<'a>(thread: *mut ThreadCtx) -> ThreadRef<'a> {
+    debug_assert!(!thread.is_null());
+
+    unsafe {
+        if (*thread).is_cfs {
+            ThreadRef::Cfs(&*cfs_thread_from_thread_ctx(thread))
+        } else {
+            ThreadRef::Rt(&*rt_thread_from_thread_ctx(thread))
+        }
+    }
 }
 
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
@@ -1004,14 +1032,11 @@ mod tests {
     }
 
     #[test]
-    fn thread_ctx_exposes_cfs_sched_entity_only_for_cfs_threads() {
+    fn cfs_thread_exposes_sched_info() {
         let mut cfs = cfs_thread("cfs", 3);
-        let rt = rt_thread("rt");
 
         assert!(ptr::eq(cfs.thread_ctx(), &cfs.thread));
-        assert!(cfs.thread.sched_info().is_some());
-        assert!(rt.thread.sched_info().is_none());
-        assert_eq!(cfs.thread.sched_info().unwrap().priority, 3);
+        assert_eq!(cfs.sched_info().priority, 3);
 
         unsafe {
             let entity = cfs_sched_entity(&mut cfs.thread);
@@ -1029,8 +1054,8 @@ mod tests {
         rt.wait_entity.set_wake_after(0, 13);
         rt.wait_entity.waitevt = 9;
 
-        assert_eq!(cfs.thread.wait_info(), (11, 7));
-        assert_eq!(rt.thread.wait_info(), (13, 9));
+        assert_eq!(cfs.wait_info(), (11, 7));
+        assert_eq!(rt.wait_info(), (13, 9));
     }
 
     #[test]
