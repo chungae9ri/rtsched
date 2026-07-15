@@ -10,7 +10,8 @@ use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, thread_from_cfs_sched_entity,
+    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
+    thread_from_cfs_sched_entity,
 };
 use crate::waitq::{WaitQueueError, insert_wait_thread};
 
@@ -161,14 +162,6 @@ unsafe impl RBTreeNode for SchedEntity {
     }
 }
 
-pub(crate) fn thread_is_cfs(thread: *const ThreadCtx) -> bool {
-    if thread.is_null() {
-        return false;
-    }
-
-    unsafe { (*thread).is_cfs }
-}
-
 /// Traverse the CFS scheduler-visible threads, including the running CFS thread.
 ///
 /// Pass `None` to get the CURRENT_THREAD_CTX running thread when it is a CFS
@@ -221,12 +214,12 @@ pub(crate) unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Optio
 /// Visit scheduler-visible CFS threads without exposing raw traversal cursors.
 pub fn traverse_run_queue_fn<F>(mut f: F)
 where
-    F: FnMut(&ThreadCtx),
+    F: FnMut(&CfsThread),
 {
     critical_section(|| unsafe {
         let mut cursor = traverse_run_queue(None);
         while let Some(thread) = cursor {
-            f(&*thread);
+            f(&*cfs_thread_from_thread_ctx(thread));
             cursor = traverse_run_queue(Some(thread));
         }
     });
@@ -402,7 +395,7 @@ mod tests {
 
     fn collect_thread_names() -> Vec<&'static str> {
         let mut names = Vec::new();
-        traverse_run_queue_fn(|thread| names.push(thread.name));
+        traverse_run_queue_fn(|thread| names.push(thread.thread_ctx().name));
 
         names
     }
