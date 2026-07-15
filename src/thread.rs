@@ -160,23 +160,6 @@ impl ThreadCtx {
         );
         self.state = next;
     }
-
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
-        unsafe {
-            let thread = self as *const ThreadCtx as *mut ThreadCtx;
-            let entity = if self.is_cfs {
-                cfs_wait_entity(thread)
-            } else {
-                rt_wait_entity(thread)
-            };
-
-            (
-                (*entity).remaining_at(ktimer_now_ticks()),
-                (*entity).waitevt,
-            )
-        }
-    }
 }
 
 /// Thread control block for CFS-scheduled threads.
@@ -213,6 +196,11 @@ impl CfsThread {
             sched_tick_cnt: entity.sched_tick_cnt(),
             vruntime: entity.vruntime(),
         }
+    }
+
+    /// Return this thread's remaining wait ticks and wait event.
+    pub fn wait_info(&self) -> (u32, u32) {
+        wait_info_from_entity(&self.wait_entity)
     }
 }
 
@@ -256,6 +244,30 @@ impl RtThread {
     pub fn runtime(&self) -> u32 {
         self.runtime
     }
+
+    /// Return this thread's remaining wait ticks and wait event.
+    pub fn wait_info(&self) -> (u32, u32) {
+        wait_info_from_entity(&self.wait_entity)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ThreadRef<'a> {
+    Cfs(&'a CfsThread),
+    Rt(&'a RtThread),
+}
+
+impl ThreadRef<'_> {
+    pub fn thread_ctx(&self) -> &ThreadCtx {
+        match self {
+            Self::Cfs(thread) => thread.thread_ctx(),
+            Self::Rt(thread) => thread.thread_ctx(),
+        }
+    }
+}
+
+fn wait_info_from_entity(entity: &WaitEntity) -> (u32, u32) {
+    (entity.remaining_at(ktimer_now_ticks()), entity.waitevt)
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -676,6 +688,18 @@ pub(crate) unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut R
         .cast::<RtThread>()
 }
 
+pub(crate) unsafe fn thread_ref_from_thread_ctx<'a>(thread: *mut ThreadCtx) -> ThreadRef<'a> {
+    debug_assert!(!thread.is_null());
+
+    unsafe {
+        if (*thread).is_cfs {
+            ThreadRef::Cfs(&*cfs_thread_from_thread_ctx(thread))
+        } else {
+            ThreadRef::Rt(&*rt_thread_from_thread_ctx(thread))
+        }
+    }
+}
+
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
     unsafe {
         if !CURRENT_THREAD_CTX.is_null() && !CURRENT_THREAD_IS_CFS {
@@ -1030,8 +1054,8 @@ mod tests {
         rt.wait_entity.set_wake_after(0, 13);
         rt.wait_entity.waitevt = 9;
 
-        assert_eq!(cfs.thread.wait_info(), (11, 7));
-        assert_eq!(rt.thread.wait_info(), (13, 9));
+        assert_eq!(cfs.wait_info(), (11, 7));
+        assert_eq!(rt.wait_info(), (13, 9));
     }
 
     #[test]
