@@ -9,7 +9,9 @@ use core::mem::offset_of;
 use core::ptr;
 use core::ptr::NonNull;
 
-use crate::arch::cm::ctx_switch::request_context_switch;
+use crate::arch::cm::platform::{
+    self, THREAD_INITIAL_FRAME_WORDS, THREAD_STACK_ALIGNMENT, request_context_switch,
+};
 use crate::clock::ticks_per_ms;
 use crate::critical_section;
 use crate::ktimer::{
@@ -26,8 +28,6 @@ use crate::waitq::WaitEntity;
 /// is needed. When dynamic thread creation is added, this should be
 /// protected by a mutex or replaced with an atomic counter.
 static mut NEXT_THREAD_ID: u32 = 0;
-const THREAD_STACK_ALIGNMENT: usize = 8;
-const THREAD_INITIAL_FRAME_WORDS: usize = 16;
 
 /// Validation failures that can be reported before a thread is spawned.
 ///
@@ -53,7 +53,7 @@ impl ThreadSpawnError {
             Self::NullThreadStorage => "thread storage pointer must be non-null",
             Self::NullStack => "thread stack pointer must be non-null",
             Self::StackTooSmall { .. } => {
-                "thread stack must reserve at least 16 words for the initial exception frame"
+                "thread stack must reserve at least 16 words for the initial platform frame"
             }
             Self::UnalignedStackTop => "thread stack top must be 8-byte aligned",
             Self::ZeroPriority => "CFS thread priority must be non-zero",
@@ -99,15 +99,15 @@ impl ThreadState {
     }
 }
 
-/// 8-byte aligned stack storage for Cortex-M thread contexts.
+/// 8-byte aligned stack storage for platform thread contexts.
 #[repr(align(8))]
 pub struct AlignedStack<const N: usize>(pub [u32; N]);
 
 impl<const N: usize> AlignedStack<N> {
     /// Return a raw pointer to the top of this stack.
     ///
-    /// Cortex-M stacks grow downward, so this is the initial stack pointer used
-    /// when building a new thread frame.
+    /// The platform stack initializer consumes this pointer when building a new
+    /// thread frame.
     pub fn top(&mut self) -> *mut u32 {
         let top = self.0.as_mut_ptr().wrapping_add(N);
         debug_assert_eq!(
@@ -132,14 +132,14 @@ pub struct SchedInfo {
 /// Common scheduler-visible thread context.
 ///
 /// `sp` points at the saved stack frame used when restoring the thread.
-/// `exc_return` records whether that saved frame belongs to MSP or PSP and
-/// whether an FPU exception frame is active.
+/// `exc_return` is a platform restore token prepared and consumed by the
+/// active context-switch backend.
 #[repr(C)]
 pub struct ThreadCtx {
     /// Stack pointer captured for the next restore of this thread.
     /// Stack pointer should be always placed in the first field.
     pub sp: u32,
-    /// Saved EXC_RETURN value used to restore the correct stack pointer.
+    /// Saved platform restore token.
     /// exc_return should be always placed in the second field.
     pub exc_return: u32,
     /// Scheduler-assigned thread identifier.
@@ -530,7 +530,7 @@ unsafe fn stack_top<const N: usize>(stack: *mut AlignedStack<N>) -> *mut u32 {
 
 pub unsafe fn forkyi<T: ThreadControlBlock>(
     thread: *mut T,
-    mut sp: *mut u32,
+    sp: *mut u32,
     entry: ThreadEntry,
     arg: *mut c_void,
     name: &'static str,
@@ -544,46 +544,13 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
         "thread stack top must be 8-byte aligned"
     );
 
-    // Build the initial stack so that, after PendSV restores r4-r11 and sets
-    // PSP, exception return consumes a standard hardware frame:
-    // r0, r1, r2, r3, r12, lr, pc, xpsr.
-    //
-    // The initial EXC_RETURN value has bit 4 set, so no floating-point context
-    // is restored until the thread actually uses the FPU and hardware records
-    // an extended exception frame.
     unsafe {
-        // Exception return requires an 8-byte aligned stack.
-        sp = ((sp as usize) & !(THREAD_STACK_ALIGNMENT - 1)) as *mut u32;
-
-        sp = sp.sub(1);
-        *sp = 0x0100_0000; // xPSR: Thumb state
-
-        sp = sp.sub(1);
-        *sp = entry as usize as u32; // PC: thread entry point
-
-        sp = sp.sub(1);
-        *sp = 0xFFFF_FFFD; // LR: return to Thread mode using PSP
-
-        sp = sp.sub(1);
-        *sp = 0x0000_0000; // R12
-
-        for _ in 0..3 {
-            sp = sp.sub(1);
-            *sp = 0x0000_0000; // R3, R2, R1
-        }
-
-        sp = sp.sub(1);
-        *sp = arg as u32; // R0: argument to the thread entry function
-
-        for _ in 0..8 {
-            sp = sp.sub(1);
-            *sp = 0x0000_0000; // R4-R11: initial values
-        }
+        let initial_context = platform::init_thread_stack(sp, entry, arg);
         let id = NEXT_THREAD_ID;
         NEXT_THREAD_ID = NEXT_THREAD_ID.wrapping_add(1);
         let common = ThreadCtx {
-            sp: sp as u32,
-            exc_return: 0xFFFF_FFFD,
+            sp: initial_context.sp,
+            exc_return: initial_context.exc_return,
             id,
             name,
             state: ThreadState::Ready,
@@ -906,7 +873,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "thread stack must reserve at least 16 words for the initial exception frame"
+        expected = "thread stack must reserve at least 16 words for the initial platform frame"
     )]
     fn cfs_thread_builder_rejects_too_small_stack() {
         let mut storage = MaybeUninit::<CfsThread>::uninit();

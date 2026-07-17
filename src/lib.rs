@@ -40,113 +40,22 @@
 /// Crate version taken from Cargo metadata at compile time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(target_arch = "arm")]
-pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
-    cortex_m::interrupt::free(|_| f())
-}
-
-#[cfg(all(not(target_arch = "arm"), test))]
-thread_local! {
-    static HOST_CRITICAL_SECTION_DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-#[cfg(all(not(target_arch = "arm"), test))]
-static HOST_CRITICAL_SECTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+mod arch;
 
 #[cfg(test)]
 pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[cfg(all(not(target_arch = "arm"), test))]
-struct HostCriticalSectionDepth;
-
-#[cfg(all(not(target_arch = "arm"), test))]
-impl Drop for HostCriticalSectionDepth {
-    fn drop(&mut self) {
-        HOST_CRITICAL_SECTION_DEPTH.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
-    }
-}
-
 /// Run `f` while scheduler globals are protected from interrupt or test-thread
 /// interleaving.
 ///
-/// On Cortex-M this delegates to `cortex_m::interrupt::free`, which is nest-safe
-/// because it restores interrupts only when they were active before entry. Host
-/// tests use a reentrant mutex-backed critical section so nested scheduler calls
-/// do not deadlock and parallel tests still serialize global state access.
-#[cfg(all(not(target_arch = "arm"), test))]
+/// On Cortex-M this delegates to the architecture platform interface, which
+/// masks interrupts in a nest-safe way. Host tests use a reentrant mutex-backed
+/// critical section so nested scheduler calls do not deadlock and parallel
+/// tests still serialize global state access.
 pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
-    let nested = HOST_CRITICAL_SECTION_DEPTH.with(|depth| {
-        let current = depth.get();
-        depth.set(current + 1);
-        current > 0
-    });
-    let _depth = HostCriticalSectionDepth;
-
-    if nested {
-        f()
-    } else {
-        let _lock = HOST_CRITICAL_SECTION_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        f()
-    }
+    crate::arch::cm::platform::critical_section(f)
 }
 
-#[cfg(all(not(target_arch = "arm"), not(test)))]
-pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
-    f()
-}
-
-#[cfg(target_arch = "arm")]
-mod arch;
-#[cfg(not(target_arch = "arm"))]
-mod arch {
-    pub mod cm {
-        pub mod ctx_switch {
-            use crate::thread::ThreadCtx;
-
-            /// Stub for starting the first scheduler thread on non-Cortex-M targets.
-            ///
-            /// # Safety
-            ///
-            /// This function is only implemented for Cortex-M targets. Calling
-            /// the host stub always panics.
-            pub unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
-                panic!("spawn_main_thread is only available on Cortex-M targets")
-            }
-
-            pub(crate) fn request_context_switch() {}
-        }
-
-        pub mod timer_cm {
-            use cortex_m::peripheral::{DCB, DWT};
-
-            pub fn init_dwt_cycle_counter(_dcb: &mut DCB, _dwt: &mut DWT) -> bool {
-                false
-            }
-
-            pub fn dwt_cycle_count() -> u32 {
-                0
-            }
-
-            pub fn reset_elapse_counter() {}
-
-            pub fn get_elapse_cycles() -> u32 {
-                0
-            }
-
-            pub fn get_elapse_msec() -> u32 {
-                0
-            }
-
-            pub fn get_elapse_msec_since(_start_cycle: u32) -> u32 {
-                0
-            }
-        }
-    }
-}
 mod clock;
 mod ktimer;
 #[doc(hidden)]
@@ -169,11 +78,9 @@ pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 
 pub use print::set_print_fn;
 
-pub use arch::cm::ctx_switch::spawn_main_thread;
-
-pub use arch::cm::timer_cm::{
+pub use arch::cm::platform::{
     dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
-    init_dwt_cycle_counter, reset_elapse_counter,
+    init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread,
 };
 
 pub use ktimer::{

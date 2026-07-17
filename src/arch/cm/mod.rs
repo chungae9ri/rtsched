@@ -2,4 +2,4 @@
 // Copyright (c) 2026 kwangdo.yi
 
 pub mod ctx_switch;
-pub mod timer_cm;
+pub(crate) mod platform;
