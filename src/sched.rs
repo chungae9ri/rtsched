@@ -3,11 +3,11 @@
 
 use core::ptr;
 
-use crate::arch::cm::ctx_switch::request_context_switch;
+use crate::arch::cm::platform::request_context_switch;
 use crate::ktimer::{
     CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
-    program_next_systick, update_next_ktimer,
+    program_next_scheduler_timer, update_next_ktimer,
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
 use crate::thread::{
@@ -145,12 +145,12 @@ extern "C" fn schedule() {
         let next_ktimer = next_ktimer();
         if next_ktimer.is_null() {
             switch_to_idle_thread_with_current_requeued();
-            program_next_systick();
+            program_next_scheduler_timer();
             return;
         }
 
         schedule_next(next_ktimer, elapsed_ticks_since_last_interrupt());
-        program_next_systick();
+        program_next_scheduler_timer();
     }
 }
 

@@ -10,8 +10,9 @@ use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
-use cortex_m::peripheral::SYST;
-
+#[cfg(target_arch = "arm")]
+use crate::arch::cm::platform;
+use crate::arch::cm::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_MIN};
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
@@ -23,9 +24,6 @@ use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
 };
 
-pub const CM_SYSTICK_RELOAD_BITS: u32 = 24;
-pub const CM_SYSTICK_RELOAD_MIN: u32 = 1;
-pub const CM_SYSTICK_RELOAD_MAX: u32 = (1 << CM_SYSTICK_RELOAD_BITS) - 1;
 const KTIMER_DEADLINE_NEVER: u64 = u64::MAX;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
@@ -96,12 +94,12 @@ impl KTimerEntity {
 
     pub fn remaining_at(&self, now_ticks: u64) -> u32 {
         if self.deadline_at == KTIMER_DEADLINE_NEVER {
-            return CM_SYSTICK_RELOAD_MAX;
+            return SCHEDULER_TIMER_RELOAD_MAX;
         }
 
         self.deadline_at
             .saturating_sub(now_ticks)
-            .min(u64::from(CM_SYSTICK_RELOAD_MAX)) as u32
+            .min(u64::from(SCHEDULER_TIMER_RELOAD_MAX)) as u32
     }
 
     pub fn is_expired_at(&self, now_ticks: u64) -> bool {
@@ -300,17 +298,17 @@ impl RtKTimer {
     }
 }
 
-/// Convert a raw tick interval into a SysTick reload register value.
+/// Convert a raw tick interval into a scheduler timer reload register value.
 ///
-/// SysTick stores a reload register value. A reload
+/// scheduler timer stores a reload register value. A reload
 /// value of `R` wraps after `R + 1` ticks, so an interval of `N` ticks must be
 /// represented as `N - 1`. This helper returns the raw conversion and allows
 /// reload `0`; scheduler programming raises the reload value `0` to
-/// `CM_SYSTICK_RELOAD_MIN` before writing the hardware register.
+/// `SCHEDULER_TIMER_RELOAD_MIN` before writing the hardware register.
 pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
     ticks
         .checked_sub(1)
-        .filter(|&reload| reload <= CM_SYSTICK_RELOAD_MAX)
+        .filter(|&reload| reload <= SCHEDULER_TIMER_RELOAD_MAX)
 }
 
 /// Initialize the global ktimer and wait-timer state.
@@ -606,11 +604,40 @@ pub fn next_ktimer_reload() -> Option<u32> {
 }
 
 pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
-    SYST::get_reload().saturating_add(1)
+    scheduler_timer_reload()
+        .or_else(next_ktimer_reload)
+        .map(|reload| reload.saturating_add(1))
+        .unwrap_or_default()
 }
 
 pub(crate) fn elapsed_ticks_since_current_reload() -> u32 {
-    SYST::get_reload().saturating_sub(SYST::get_current())
+    elapsed_ticks_from_platform_timer()
+}
+
+#[cfg(target_arch = "arm")]
+fn scheduler_timer_reload() -> Option<u32> {
+    platform::scheduler_timer_reload()
+}
+
+#[cfg(not(target_arch = "arm"))]
+fn scheduler_timer_reload() -> Option<u32> {
+    None
+}
+
+#[cfg(target_arch = "arm")]
+fn elapsed_ticks_from_platform_timer() -> u32 {
+    match (
+        platform::scheduler_timer_reload(),
+        platform::scheduler_timer_current(),
+    ) {
+        (Some(reload), Some(current)) => reload.saturating_sub(current),
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_arch = "arm"))]
+fn elapsed_ticks_from_platform_timer() -> u32 {
+    0
 }
 
 pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
@@ -794,16 +821,22 @@ unsafe fn yield_ktimer_in_queue(
 }
 
 fn writable_reload(reload: u32) -> u32 {
-    reload.clamp(CM_SYSTICK_RELOAD_MIN, CM_SYSTICK_RELOAD_MAX)
+    reload.clamp(SCHEDULER_TIMER_RELOAD_MIN, SCHEDULER_TIMER_RELOAD_MAX)
 }
 
 fn programmable_reload_from_ticks(ticks: u32) -> u32 {
-    let reload =
-        reload_from_ticks(ticks).unwrap_or(if ticks == 0 { 0 } else { CM_SYSTICK_RELOAD_MAX });
+    let reload = reload_from_ticks(ticks).unwrap_or(if ticks == 0 {
+        0
+    } else {
+        SCHEDULER_TIMER_RELOAD_MAX
+    });
     writable_reload(reload)
 }
 
-unsafe fn systick_reload_for_entity(queue: &KTimerQueue, entity: *mut KTimerEntity) -> Option<u32> {
+unsafe fn scheduler_timer_reload_for_entity(
+    queue: &KTimerQueue,
+    entity: *mut KTimerEntity,
+) -> Option<u32> {
     if entity.is_null() {
         return None;
     }
@@ -816,7 +849,7 @@ unsafe fn systick_reload_for_entity(queue: &KTimerQueue, entity: *mut KTimerEnti
                 .deadline_at
                 .saturating_sub(queue.now_ticks())
                 .saturating_sub(1)
-                .min(u64::from(CM_SYSTICK_RELOAD_MAX)) as u32;
+                .min(u64::from(SCHEDULER_TIMER_RELOAD_MAX)) as u32;
             writable_reload(raw_reload)
         };
 
@@ -824,18 +857,18 @@ unsafe fn systick_reload_for_entity(queue: &KTimerQueue, entity: *mut KTimerEnti
     }
 }
 
-unsafe fn next_systick_reload(queue: &KTimerQueue) -> Option<u32> {
-    unsafe { systick_reload_for_entity(queue, queue.first()) }
+unsafe fn next_scheduler_timer_reload(queue: &KTimerQueue) -> Option<u32> {
+    unsafe { scheduler_timer_reload_for_entity(queue, queue.first()) }
 }
 
-pub(crate) fn program_next_systick() -> Option<u32> {
+pub(crate) fn program_next_scheduler_timer() -> Option<u32> {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let reload = next_systick_reload(queue)?;
+        let reload = next_scheduler_timer_reload(queue)?;
 
-        debug_assert!((CM_SYSTICK_RELOAD_MIN..=CM_SYSTICK_RELOAD_MAX).contains(&reload));
-        (*SYST::PTR).rvr.write(reload);
-        (*SYST::PTR).cvr.write(0);
+        debug_assert!((SCHEDULER_TIMER_RELOAD_MIN..=SCHEDULER_TIMER_RELOAD_MAX).contains(&reload));
+        #[cfg(target_arch = "arm")]
+        let _ = platform::program_scheduler_timer_reload(reload);
 
         Some(reload)
     })
@@ -944,7 +977,7 @@ impl KTimerQueue {
     }
 
     pub fn next_reload(&self) -> Option<u32> {
-        unsafe { next_systick_reload(self) }
+        unsafe { next_scheduler_timer_reload(self) }
     }
 
     pub fn advance_time(&mut self, elapsed: u32) {
@@ -1117,27 +1150,33 @@ mod tests {
     }
 
     #[test]
-    fn reload_from_ticks_converts_to_systick_reload() {
+    fn reload_from_ticks_converts_to_scheduler_timer_reload() {
         assert_eq!(reload_from_ticks(0), None);
         assert_eq!(reload_from_ticks(1), Some(0));
-        assert_eq!(reload_from_ticks(2), Some(CM_SYSTICK_RELOAD_MIN));
+        assert_eq!(reload_from_ticks(2), Some(SCHEDULER_TIMER_RELOAD_MIN));
         assert_eq!(reload_from_ticks(42), Some(41));
         assert_eq!(
-            reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 1),
-            Some(CM_SYSTICK_RELOAD_MAX)
+            reload_from_ticks(SCHEDULER_TIMER_RELOAD_MAX + 1),
+            Some(SCHEDULER_TIMER_RELOAD_MAX)
         );
-        assert_eq!(reload_from_ticks(CM_SYSTICK_RELOAD_MAX + 2), None);
+        assert_eq!(reload_from_ticks(SCHEDULER_TIMER_RELOAD_MAX + 2), None);
     }
 
     #[test]
     fn writable_reload_clamps_raw_zero_to_minimum_reload() {
-        assert_eq!(writable_reload(0), CM_SYSTICK_RELOAD_MIN);
+        assert_eq!(writable_reload(0), SCHEDULER_TIMER_RELOAD_MIN);
         assert_eq!(
-            writable_reload(CM_SYSTICK_RELOAD_MAX + 1),
-            CM_SYSTICK_RELOAD_MAX
+            writable_reload(SCHEDULER_TIMER_RELOAD_MAX + 1),
+            SCHEDULER_TIMER_RELOAD_MAX
         );
-        assert_eq!(programmable_reload_from_ticks(0), CM_SYSTICK_RELOAD_MIN);
-        assert_eq!(programmable_reload_from_ticks(1), CM_SYSTICK_RELOAD_MIN);
+        assert_eq!(
+            programmable_reload_from_ticks(0),
+            SCHEDULER_TIMER_RELOAD_MIN
+        );
+        assert_eq!(
+            programmable_reload_from_ticks(1),
+            SCHEDULER_TIMER_RELOAD_MIN
+        );
     }
 
     #[test]
@@ -1216,9 +1255,12 @@ mod tests {
         assert_eq!(long.remaining_at(queue.now_ticks()), 15);
         assert_eq!(
             parked.entity.remaining_at(queue.now_ticks()),
-            CM_SYSTICK_RELOAD_MAX
+            SCHEDULER_TIMER_RELOAD_MAX
         );
-        assert_eq!(collect_remaining(&queue), [0, 15, CM_SYSTICK_RELOAD_MAX]);
+        assert_eq!(
+            collect_remaining(&queue),
+            [0, 15, SCHEDULER_TIMER_RELOAD_MAX]
+        );
     }
 
     #[test]
@@ -1231,31 +1273,31 @@ mod tests {
         }
 
         assert_eq!(queue.next_deadline(), Some(0));
-        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MIN));
+        assert_eq!(queue.next_reload(), Some(SCHEDULER_TIMER_RELOAD_MIN));
     }
 
     #[test]
     fn next_reload_clamps_far_deadlines_to_maximum_reload() {
         let mut queue = KTimerQueue::new();
         let mut far = KTimerEntity::new(1);
-        far.set_deadline_at(u64::from(CM_SYSTICK_RELOAD_MAX) + 42);
+        far.set_deadline_at(u64::from(SCHEDULER_TIMER_RELOAD_MAX) + 42);
 
         unsafe {
             queue.insert(&mut far);
         }
 
-        assert_eq!(queue.next_deadline(), Some(CM_SYSTICK_RELOAD_MAX));
-        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+        assert_eq!(queue.next_deadline(), Some(SCHEDULER_TIMER_RELOAD_MAX));
+        assert_eq!(queue.next_reload(), Some(SCHEDULER_TIMER_RELOAD_MAX));
     }
 
     #[test]
-    fn long_rt_deadline_is_dispatched_after_multiple_systick_chunks() {
+    fn long_rt_deadline_is_dispatched_after_multiple_scheduler_timer_chunks() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         let mut queue = KTimerQueue::new();
         let mut rt = rt_thread("rt");
         let mut ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
-        let max_chunk_ticks = CM_SYSTICK_RELOAD_MAX + 1;
+        let max_chunk_ticks = SCHEDULER_TIMER_RELOAD_MAX + 1;
         let long_deadline = u64::from(max_chunk_ticks) * 2 + 5;
 
         unsafe {
@@ -1264,7 +1306,7 @@ mod tests {
             queue.insert(ktimer.entity_mut());
         }
 
-        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+        assert_eq!(queue.next_reload(), Some(SCHEDULER_TIMER_RELOAD_MAX));
 
         queue.advance_time(max_chunk_ticks);
         let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
@@ -1272,7 +1314,7 @@ mod tests {
         assert_eq!(queue.now_ticks(), u64::from(max_chunk_ticks));
         assert_eq!(ktimer.entity.deadline_at(), long_deadline);
         assert_eq!(ktimer.entity.miss_cnt, 0);
-        assert_eq!(queue.next_reload(), Some(CM_SYSTICK_RELOAD_MAX));
+        assert_eq!(queue.next_reload(), Some(SCHEDULER_TIMER_RELOAD_MAX));
 
         queue.advance_time(max_chunk_ticks);
         let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
