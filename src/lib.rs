@@ -53,7 +53,7 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// critical section so nested scheduler calls do not deadlock and parallel
 /// tests still serialize global state access.
 pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
-    crate::arch::cm::platform::critical_section(f)
+    crate::arch::platform::critical_section(f)
 }
 
 mod clock;
@@ -79,6 +79,8 @@ pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 pub use print::set_print_fn;
 
 pub use arch::cm::platform::{
+    ContextSwitchPort, CortexMPlatform, CriticalSectionPort, CycleCounterPort, DefaultPlatform,
+    HostPlatform, InitialThreadContext, Platform, SchedulerTimerPort, ThreadStackPort,
     dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
     init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread,
 };

@@ -10,9 +10,8 @@ use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::ptr;
 
-#[cfg(target_arch = "arm")]
-use crate::arch::cm::platform;
-use crate::arch::cm::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_MIN};
+use crate::arch::platform;
+use crate::arch::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_MIN};
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
@@ -614,17 +613,10 @@ pub(crate) fn elapsed_ticks_since_current_reload() -> u32 {
     elapsed_ticks_from_platform_timer()
 }
 
-#[cfg(target_arch = "arm")]
 fn scheduler_timer_reload() -> Option<u32> {
     platform::scheduler_timer_reload()
 }
 
-#[cfg(not(target_arch = "arm"))]
-fn scheduler_timer_reload() -> Option<u32> {
-    None
-}
-
-#[cfg(target_arch = "arm")]
 fn elapsed_ticks_from_platform_timer() -> u32 {
     match (
         platform::scheduler_timer_reload(),
@@ -633,11 +625,6 @@ fn elapsed_ticks_from_platform_timer() -> u32 {
         (Some(reload), Some(current)) => reload.saturating_sub(current),
         _ => 0,
     }
-}
-
-#[cfg(not(target_arch = "arm"))]
-fn elapsed_ticks_from_platform_timer() -> u32 {
-    0
 }
 
 pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
@@ -867,7 +854,6 @@ pub(crate) fn program_next_scheduler_timer() -> Option<u32> {
         let reload = next_scheduler_timer_reload(queue)?;
 
         debug_assert!((SCHEDULER_TIMER_RELOAD_MIN..=SCHEDULER_TIMER_RELOAD_MAX).contains(&reload));
-        #[cfg(target_arch = "arm")]
         let _ = platform::program_scheduler_timer_reload(reload);
 
         Some(reload)
