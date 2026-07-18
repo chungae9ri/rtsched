@@ -28,6 +28,17 @@ concrete thread storage. The board initializes the ktimer queue and CFS schedule
 creates threads with dedicated stacks, registers the idle thread with
 `register_idle_thread`, then starts the first thread with `spawn_main_thread`.
 
+## High level features
+
+| Feature area | What `rtsched` provides |
+| --- | --- |
+| Scheduling scheme | Mixed soft real-time and fair scheduling with EDF-style `RtThread` timers and CFS-style `CfsThread` run queues. |
+| Timer framework | Intrusive red-black tree based `KTimer` queue for deadlines, CFS execution windows, RT releases, and sleep wakeups. |
+| Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting` states, yielding, waiting, and idle-thread fallback. |
+| Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
+| Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code can register a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
+| Diagnostics | Lightweight tracing counters, optional callbacks, cycle-counter helpers, and scheduler timing diagnostics. |
+
 ## Platform common traits
 
 The architecture layer is exposed through small common traits so scheduler code
