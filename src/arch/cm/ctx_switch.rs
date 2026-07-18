@@ -121,17 +121,3 @@ mod imp {
 
 #[cfg(target_arch = "arm")]
 pub use self::imp::spawn_main_thread;
-
-#[cfg(not(target_arch = "arm"))]
-use crate::thread::ThreadCtx;
-
-/// Stub for starting the first scheduler thread on non-Cortex-M targets.
-///
-/// # Safety
-///
-/// This function is only implemented for Cortex-M targets. Calling the host
-/// stub always panics.
-#[cfg(not(target_arch = "arm"))]
-pub unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
-    panic!("spawn_main_thread is only available on Cortex-M targets")
-}

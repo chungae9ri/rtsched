@@ -9,7 +9,7 @@ use core::mem::offset_of;
 use core::ptr;
 use core::ptr::NonNull;
 
-use crate::arch::cm::platform::{
+use crate::arch::platform::{
     self, THREAD_INITIAL_FRAME_WORDS, THREAD_STACK_ALIGNMENT, request_context_switch,
 };
 use crate::clock::ticks_per_ms;
