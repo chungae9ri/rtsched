@@ -320,3 +320,19 @@ probe-rs download \
 
 Replace `minimal_cfs` with `minimal_rt`, `mixed_rt_cfs`, or `sleep_wake` to run
 the other examples.
+
+## Architecture and roadmap
+
+`rtsched` is meant to stay a small kernel crate rather than grow into an
+integrated operating system. The public API provides thread creation,
+scheduling, sleeping, waiting, and diagnostics hooks. The scheduler core owns the
+intrusive run, timer, and wait queues. The platform layer supplies only the
+CPU-specific pieces needed for critical sections, stack setup, timer
+programming, and context switching.
+
+Board crates remain responsible for startup, linker scripts, clocks,
+peripherals, HAL ownership, and concrete thread/storage allocation. Network
+stacks, filesystems, USB, shells, logging frameworks, and application services
+should live outside `rtsched` and use the kernel APIs rather than become part
+of the crate. Example board integrations live in
+[`rtsched-boards`](https://github.com/chungae9ri/rtsched-boards).
