@@ -11,7 +11,7 @@ use crate::ktimer::{
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
+    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
     thread_from_cfs_sched_entity,
 };
 
@@ -50,11 +50,13 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
 ///
 /// # Safety
 ///
-/// `thread` must point to a live CFS `ThreadCtx` created by a thread builder,
-/// and its backing storage and stack must outlive all scheduler use. Call this
-/// only after the CFS run queue has been initialized and while scheduler state
-/// is not being concurrently modified.
-pub unsafe fn register_idle_thread(thread: *mut ThreadCtx) {
+/// `thread` must refer to a live CFS thread created by a thread builder, and
+/// its backing storage and stack must outlive all scheduler use. Call this only
+/// after the CFS run queue has been initialized and while scheduler state is not
+/// being concurrently modified.
+pub unsafe fn register_idle_thread(thread: ThreadHandle) {
+    let thread = thread.as_ptr();
+
     crate::critical_section(|| unsafe {
         assert!(!thread.is_null(), "idle thread must be non-null");
         assert!((*thread).is_cfs, "idle thread must be a CFS thread");
@@ -275,7 +277,7 @@ mod tests {
     use super::*;
     use crate::TEST_LOCK;
     use crate::ktimer::{RtKTimer, init_ktimer_queue};
-    use crate::thread::{CfsThread, RtThread};
+    use crate::thread::{CfsThread, RtThread, ThreadHandle};
     use crate::waitq::WaitEntity;
 
     fn cfs_thread(
@@ -334,6 +336,10 @@ mod tests {
             (*CFS_RUN_QUEUE.get()).insert(entity);
             *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
         }
+    }
+
+    unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
+        unsafe { ThreadHandle::from_thread_ctx(thread) }
     }
 
     unsafe fn running_thread_count(threads: &[*const ThreadCtx]) -> usize {
@@ -532,7 +538,7 @@ mod tests {
             let _ = reset_sched_state();
             queue_cfs_thread(&mut idle.thread);
 
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
         }
 
         unsafe {
@@ -552,7 +558,7 @@ mod tests {
 
         unsafe {
             let cfs_ktimer = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             CURRENT_THREAD_CTX = &mut rt.thread;
             CURRENT_THREAD_IS_CFS = false;
 
@@ -578,7 +584,7 @@ mod tests {
 
         unsafe {
             let cfs_ktimer = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             CURRENT_THREAD_CTX = &mut current.thread;
             CURRENT_THREAD_IS_CFS = true;
             *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
@@ -610,7 +616,7 @@ mod tests {
         unsafe {
             let cfs_ktimer = reset_sched_state();
             (*cfs_ktimer).set_active(false);
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             CURRENT_THREAD_CTX = &mut rt.thread;
             CURRENT_THREAD_IS_CFS = false;
             queue_cfs_thread(&mut queued.thread);
@@ -640,7 +646,7 @@ mod tests {
 
         unsafe {
             let cfs_ktimer = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             idle.thread.state = ThreadState::Running;
             CURRENT_THREAD_CTX = &mut idle.thread;
             CURRENT_THREAD_IS_CFS = true;
@@ -669,7 +675,7 @@ mod tests {
 
         unsafe {
             let _ = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             idle.thread.state = ThreadState::Running;
             rt_ktimer.init_rt_ktimer(&mut rt.thread);
             CURRENT_THREAD_CTX = &mut idle.thread;
@@ -697,7 +703,7 @@ mod tests {
 
         unsafe {
             let _ = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
             CURRENT_THREAD_CTX = &mut current.thread;
             CURRENT_THREAD_IS_CFS = true;
             *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
@@ -727,7 +733,7 @@ mod tests {
 
         unsafe {
             let _ = reset_sched_state();
-            register_idle_thread(&mut idle.thread);
+            register_idle_thread(thread_handle(&mut idle.thread));
         }
 
         traverse_idle_thread_fn(|thread| {

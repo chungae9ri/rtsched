@@ -4,6 +4,7 @@
 //! Core thread definitions for the runtime scheduler.
 
 use core::ffi::c_void;
+use core::fmt;
 use core::mem::MaybeUninit;
 use core::mem::offset_of;
 use core::ptr;
@@ -28,6 +29,89 @@ use crate::waitq::WaitEntity;
 /// is needed. When dynamic thread creation is added, this should be
 /// protected by a mutex or replaced with an atomic counter.
 static mut NEXT_THREAD_ID: u32 = 0;
+
+/// Scheduler-assigned thread identifier.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ThreadId(u32);
+
+impl ThreadId {
+    /// Return the numeric identifier assigned when the thread was spawned.
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+/// Opaque reference to a scheduler thread.
+///
+/// Handles are returned by thread builders after the caller has provided
+/// storage that satisfies the builder's lifetime requirements. The handle is
+/// copyable and non-owning: it identifies scheduler-owned/static thread
+/// storage, but it does not manage that storage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ThreadHandle {
+    thread: NonNull<ThreadCtx>,
+}
+
+impl ThreadHandle {
+    pub(crate) unsafe fn from_thread_ctx(thread: *mut ThreadCtx) -> Self {
+        debug_assert!(!thread.is_null(), "thread pointer must be non-null");
+
+        unsafe {
+            Self {
+                thread: NonNull::new_unchecked(thread),
+            }
+        }
+    }
+
+    pub(crate) fn as_ptr(self) -> *mut ThreadCtx {
+        self.thread.as_ptr()
+    }
+
+    fn with_thread_ctx<R>(self, f: impl FnOnce(&ThreadCtx) -> R) -> R {
+        critical_section(|| unsafe { f(self.thread.as_ref()) })
+    }
+
+    /// Return this thread's scheduler-assigned identifier.
+    pub fn id(self) -> ThreadId {
+        self.with_thread_ctx(ThreadCtx::id)
+    }
+
+    /// Return this thread's static diagnostic name.
+    pub fn name(self) -> &'static str {
+        self.with_thread_ctx(ThreadCtx::name)
+    }
+
+    /// Return this thread's current scheduler state.
+    pub fn state(self) -> ThreadState {
+        self.with_thread_ctx(ThreadCtx::state)
+    }
+
+    /// Return whether this handle refers to a CFS thread.
+    pub fn is_cfs(self) -> bool {
+        self.with_thread_ctx(ThreadCtx::is_cfs)
+    }
+
+    /// Return whether this handle refers to an RT thread.
+    pub fn is_rt(self) -> bool {
+        !self.is_cfs()
+    }
+}
+
+impl fmt::Debug for ThreadHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (id, name, state, is_cfs) = self.with_thread_ctx(|thread| {
+            (thread.id(), thread.name(), thread.state(), thread.is_cfs())
+        });
+
+        f.debug_struct("ThreadHandle")
+            .field("id", &id)
+            .field("name", &name)
+            .field("state", &state)
+            .field("is_cfs", &is_cfs)
+            .finish()
+    }
+}
 
 /// Validation failures that can be reported before a thread is spawned.
 ///
@@ -153,6 +237,22 @@ pub struct ThreadCtx {
 }
 
 impl ThreadCtx {
+    pub const fn id(&self) -> ThreadId {
+        ThreadId(self.id)
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn state(&self) -> ThreadState {
+        self.state
+    }
+
+    pub const fn is_cfs(&self) -> bool {
+        self.is_cfs
+    }
+
     pub(crate) fn set_state(&mut self, next: ThreadState) {
         debug_assert!(
             self.state.can_transition_to(next),
@@ -393,7 +493,7 @@ impl CfsThreadBuilder {
         self,
         thread: *mut MaybeUninit<CfsThread>,
         stack: *mut AlignedStack<N>,
-    ) -> *mut ThreadCtx {
+    ) -> ThreadHandle {
         unsafe {
             self.try_spawn(thread, stack)
                 .unwrap_or_else(|error| panic!("{}", error.message()))
@@ -410,7 +510,7 @@ impl CfsThreadBuilder {
         self,
         thread: *mut MaybeUninit<CfsThread>,
         stack: *mut AlignedStack<N>,
-    ) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+    ) -> Result<ThreadHandle, ThreadSpawnError> {
         if self.priority == 0 {
             return Err(ThreadSpawnError::ZeroPriority);
         }
@@ -447,7 +547,7 @@ impl RtThreadBuilder {
         self,
         thread: *mut MaybeUninit<RtThread>,
         stack: *mut AlignedStack<N>,
-    ) -> *mut ThreadCtx {
+    ) -> ThreadHandle {
         unsafe {
             self.try_spawn(thread, stack)
                 .unwrap_or_else(|error| panic!("{}", error.message()))
@@ -464,7 +564,7 @@ impl RtThreadBuilder {
         self,
         thread: *mut MaybeUninit<RtThread>,
         stack: *mut AlignedStack<N>,
-    ) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+    ) -> Result<ThreadHandle, ThreadSpawnError> {
         if self.ktimer.is_null() {
             return Err(ThreadSpawnError::NullRtTimer);
         }
@@ -478,19 +578,21 @@ unsafe fn try_spawn_thread<T: ThreadControlBlock, const N: usize>(
     stack: *mut AlignedStack<N>,
     start: ThreadStart,
     init_args: T::InitArgs,
-) -> Result<*mut ThreadCtx, ThreadSpawnError> {
+) -> Result<ThreadHandle, ThreadSpawnError> {
     validate_thread_storage(thread)?;
     validate_stack(stack)?;
 
     unsafe {
-        Ok(forkyi(
+        let thread = forkyi(
             thread.cast::<T>(),
             stack_top(stack),
             start.entry,
             start.arg,
             start.name,
             init_args,
-        ))
+        );
+
+        Ok(ThreadHandle::from_thread_ctx(thread))
     }
 }
 
@@ -829,12 +931,18 @@ mod tests {
 
         unsafe {
             crate::runq::init_cfs_rq();
-            let thread = CfsThreadBuilder::new("cfs", test_entry, 3)
+            let handle = CfsThreadBuilder::new("cfs", test_entry, 3)
                 .with_arg(arg)
                 .spawn(&mut storage, &mut stack);
+            let thread = handle.as_ptr();
             let cfs = &*storage.as_ptr();
 
             assert!(ptr::eq(thread, ptr::addr_of!(cfs.thread).cast_mut()));
+            assert_eq!(handle.id().as_u32(), (*thread).id);
+            assert_eq!(handle.name(), "cfs");
+            assert_eq!(handle.state(), ThreadState::Ready);
+            assert!(handle.is_cfs());
+            assert!(!handle.is_rt());
             assert_eq!((*thread).name, "cfs");
             assert!((*thread).is_cfs);
             assert_eq!(cfs.sched_entity.priority, 3);
@@ -855,11 +963,17 @@ mod tests {
 
         unsafe {
             init_ktimer_queue();
-            let thread =
+            let handle =
                 RtThreadBuilder::new("rt", test_entry, &mut ktimer).spawn(&mut storage, &mut stack);
+            let thread = handle.as_ptr();
             let rt = &*storage.as_ptr();
 
             assert!(ptr::eq(thread, ptr::addr_of!(rt.thread).cast_mut()));
+            assert_eq!(handle.id().as_u32(), (*thread).id);
+            assert_eq!(handle.name(), "rt");
+            assert_eq!(handle.state(), ThreadState::Ready);
+            assert!(!handle.is_cfs());
+            assert!(handle.is_rt());
             assert_eq!((*thread).name, "rt");
             assert!(!(*thread).is_cfs);
             assert_eq!(rt.runtime, 0);
