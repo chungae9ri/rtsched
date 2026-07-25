@@ -16,7 +16,7 @@ use cortex_m::peripheral::{SCB, SYST};
 
 #[cfg(target_arch = "arm")]
 use crate::clock::ticks_per_ms;
-use crate::thread::{ThreadCtx, ThreadEntry};
+use crate::thread::{ThreadEntry, ThreadHandle};
 
 const CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS: u32 = 24;
 const CORTEX_M_SCHEDULER_TIMER_RELOAD_MIN: u32 = 1;
@@ -66,9 +66,9 @@ pub trait ContextSwitchPort {
 
     /// # Safety
     ///
-    /// `thread` must satisfy the active context-switch backend's stack and
-    /// lifetime requirements.
-    unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> !;
+    /// `thread` must satisfy the active context-switch backend's stack,
+    /// scheduler-state, and lifetime requirements.
+    unsafe fn spawn_main_thread(thread: ThreadHandle) -> !;
 }
 
 /// Provides the reloadable timer used by the kernel timer queue.
@@ -275,8 +275,8 @@ impl ContextSwitchPort for CortexMPlatform {
         SCB::set_pendsv();
     }
 
-    unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
-        unsafe { super::ctx_switch::spawn_main_thread(thread) }
+    unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
+        unsafe { super::ctx_switch::spawn_main_thread(thread.as_ptr()) }
     }
 }
 
@@ -284,7 +284,7 @@ impl ContextSwitchPort for CortexMPlatform {
 impl ContextSwitchPort for HostPlatform {
     fn request_context_switch() {}
 
-    unsafe fn spawn_main_thread(_thread: *mut ThreadCtx) -> ! {
+    unsafe fn spawn_main_thread(_thread: ThreadHandle) -> ! {
         panic!("spawn_main_thread is only available on Cortex-M targets")
     }
 }
@@ -293,9 +293,10 @@ impl ContextSwitchPort for HostPlatform {
 ///
 /// # Safety
 ///
-/// See the Cortex-M context-switch backend for the required thread and stack
-/// invariants.
-pub unsafe fn spawn_main_thread(thread: *mut ThreadCtx) -> ! {
+/// `thread` must refer to a live thread created by a thread builder. Its stack
+/// and thread storage must outlive all scheduler use, scheduler queues must be
+/// initialized, and no other thread may already be running.
+pub unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
     unsafe { <DefaultPlatform as ContextSwitchPort>::spawn_main_thread(thread) }
 }
 

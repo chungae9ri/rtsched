@@ -70,8 +70,8 @@ mod waitq;
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
     AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
-    ThreadEntry, ThreadRef, ThreadSpawnError, ThreadStart, ThreadState, current_rt_thread_runtime,
-    msleepyi, set_rt_thread_start_time, yieldyi,
+    ThreadEntry, ThreadHandle, ThreadId, ThreadRef, ThreadSpawnError, ThreadStart, ThreadState,
+    current_rt_thread_runtime, msleepyi, set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};

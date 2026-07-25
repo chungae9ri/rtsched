@@ -8,12 +8,21 @@ so additional architecture backends can be added under `src/arch`. The embedded
 examples additionally use `cortex-m-rt` for startup, exception entry points,
 and linker/runtime support.
 
+`rtsched` is meant to stay a small kernel crate rather than grow into an
+integrated operating system. The public API provides thread creation,
+scheduling, sleeping, waiting, and diagnostics hooks. The scheduler core owns the
+intrusive run, timer, and wait queues. The platform layer supplies only the
+CPU-specific pieces needed for critical sections, stack setup, timer
+programming, and context switching.
+
 The crate includes:
 
 - `Earliest Deadline First (EDF)` scheduling through the `KTimer` framework.
 - A kernel timer queue built on an intrusive red-black tree.
 - CFS (Completely Fair Scheduler) style scheduled threads `CfsThread` through the `RunQueue` red-black tree.
 - `RtThread` associated with a dedicated `KTimer` entry for `EDF` scheduling.
+- `ThreadHandle` and `ThreadId` for referring to spawned threads without
+  passing raw thread-context pointers through application code.
 - `WaitQueue` red-black tree for threads in `Waiting` state.
 - Thread spawn with a dedicated stack (`forkyi`).
 - Registered idle thread fallback when no normal CFS or RT work is runnable.
@@ -25,9 +34,14 @@ The crate includes:
 `rtsched` is intended to be used by a board crate that owns hardware setup,
 clock configuration, `SysTick` configuration, thread stack allocation, and
 concrete thread storage. The board initializes the ktimer queue and CFS scheduler,
-creates threads with dedicated stacks, registers the idle thread with
-`register_idle_thread`, then starts the first thread with `spawn_main_thread`.
-
+creates threads with dedicated stacks, keeps the returned `ThreadHandle` values,
+registers the idle thread with `register_idle_thread`, then starts the first
+thread with `spawn_main_thread`.
+Network stacks, filesystems, USB, shells, logging frameworks, and application services
+should live outside `rtsched` and use the kernel APIs rather than become part
+of the crate. Example board integrations live in
+[`rtsched-boards`](https://github.com/chungae9ri/rtsched-boards).
+`
 ## High level features
 
 | Feature area | What `rtsched` provides |
@@ -321,18 +335,3 @@ probe-rs download \
 Replace `minimal_cfs` with `minimal_rt`, `mixed_rt_cfs`, or `sleep_wake` to run
 the other examples.
 
-## Architecture and roadmap
-
-`rtsched` is meant to stay a small kernel crate rather than grow into an
-integrated operating system. The public API provides thread creation,
-scheduling, sleeping, waiting, and diagnostics hooks. The scheduler core owns the
-intrusive run, timer, and wait queues. The platform layer supplies only the
-CPU-specific pieces needed for critical sections, stack setup, timer
-programming, and context switching.
-
-Board crates remain responsible for startup, linker scripts, clocks,
-peripherals, HAL ownership, and concrete thread/storage allocation. Network
-stacks, filesystems, USB, shells, logging frameworks, and application services
-should live outside `rtsched` and use the kernel APIs rather than become part
-of the crate. Example board integrations live in
-[`rtsched-boards`](https://github.com/chungae9ri/rtsched-boards).
