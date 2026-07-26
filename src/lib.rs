@@ -71,7 +71,8 @@ mod waitq;
 pub use thread::{
     AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
     ThreadEntry, ThreadHandle, ThreadId, ThreadRef, ThreadSpawnError, ThreadStart, ThreadState,
-    current_rt_thread_runtime, msleepyi, set_rt_thread_start_time, yieldyi,
+    current_rt_thread_runtime, current_thread, current_thread_id, msleepyi,
+    set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};

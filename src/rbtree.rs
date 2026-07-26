@@ -69,6 +69,12 @@ pub(crate) unsafe trait RBTreeNode: Sized {
 
     /// Compare two entities. Equal keys must be resolved with a strict
     /// tie-breaker, usually the entity address, so tree ordering is total.
+    ///
+    /// # Safety
+    ///
+    /// `a` and `b` must be non-null pointers to live entities of `Self`.
+    /// Implementations may dereference both pointers to read ordering keys, but
+    /// must not mutate tree links or otherwise change either entity.
     unsafe fn cmp(a: *const Self, b: *const Self) -> Ordering;
 }
 
@@ -157,8 +163,10 @@ impl<T: RBTreeNode> RBTree<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `entity` is valid for mutation and is not
-    /// simultaneously linked into another tree.
+    /// `entity` must be non-null, valid for mutation, and backed by storage
+    /// that outlives its tree membership. It must not be linked into this or
+    /// any other tree. The caller must hold exclusive access to this tree for
+    /// the duration of the insertion.
     pub unsafe fn insert(&mut self, entity: *mut T) {
         debug_assert!(!entity.is_null());
         debug_assert!(
@@ -200,7 +208,9 @@ impl<T: RBTreeNode> RBTree<T> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `entity` currently belongs to this tree.
+    /// `entity` must either be null or currently linked into this tree. If it
+    /// is non-null, it must remain valid for mutation for the duration of the
+    /// removal. The caller must hold exclusive access to this tree.
     pub unsafe fn remove(&mut self, entity: *mut T) -> *mut T {
         if entity.is_null() {
             return ptr::null_mut();
@@ -255,6 +265,12 @@ impl<T: RBTreeNode> RBTree<T> {
     }
 
     /// Remove and return the left-most entity in the tree.
+    ///
+    /// # Safety
+    ///
+    /// Every entity linked into this tree must remain valid for mutation, and
+    /// the caller must hold exclusive access to the tree for the duration of
+    /// the removal and returned mutable borrow.
     pub unsafe fn pop_first(&mut self) -> Option<&mut T> {
         let first = self.first();
         if first.is_null() {

@@ -122,6 +122,13 @@ impl KTimerEntity {
         self.active = active;
     }
 
+    /// Recover the owning RT timer from its embedded timer entity.
+    ///
+    /// # Safety
+    ///
+    /// `entity` must be non-null and must point to the `entity` field of a
+    /// live `RtKTimer`. It must not point to the global CFS timer, the global
+    /// wait timer, or any other allocation with a `KTimerEntity` layout.
     pub unsafe fn rt_ktimer(entity: *mut Self) -> *mut RtKTimer {
         debug_assert!(!entity.is_null());
         debug_assert!(!is_cfs_ktimer(entity));
@@ -131,6 +138,13 @@ impl KTimerEntity {
             .cast::<RtKTimer>()
     }
 
+    /// Recover the owning CFS timer from its embedded timer entity.
+    ///
+    /// # Safety
+    ///
+    /// `entity` must be non-null and must point to the `entity` field of the
+    /// live global `CFS_KTIMER`. Passing any RT timer entity, the wait timer
+    /// entity, or unrelated storage produces an invalid owner pointer.
     pub unsafe fn cfs_ktimer(entity: *mut Self) -> *mut CfsKTimer {
         debug_assert!(!entity.is_null());
         debug_assert!(is_cfs_ktimer(entity));
@@ -315,8 +329,12 @@ pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
 /// # Safety
 ///
 /// Call this during single-threaded scheduler setup, before interrupts or
-/// threads can access the ktimer queue. Reinitializing while queued timer
-/// entities are still in use invalidates the intrusive queue links.
+/// threads can access the ktimer or wait queues. `init_cfs` and RT thread
+/// spawning must happen after this initialization.
+///
+/// Do not call this while timer entities or wait entities are queued, running,
+/// or otherwise visible to the scheduler. Reinitializing with live entities
+/// invalidates their intrusive links and loses the current timer deadline.
 pub unsafe fn init_ktimer_queue() {
     critical_section(|| unsafe {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
@@ -970,6 +988,19 @@ impl KTimerQueue {
         self.now_ticks = self.now_ticks.saturating_add(u64::from(elapsed));
     }
 
+    /// Dispatch all timers that expired at the queue's current time.
+    ///
+    /// # Safety
+    ///
+    /// The queue must contain only valid timer entities whose backing storage
+    /// outlives the queue entry. Any RT timer entity in the queue must refer to
+    /// a live `RtThread`, and the global wait queue must not be concurrently
+    /// mutated while expired wait timers are processed.
+    ///
+    /// `elapsed` must be the elapsed tick count for the scheduler interval
+    /// being dispatched. Callers must hold exclusive access to this queue and
+    /// serialize dispatch against scheduler interrupts and other queue
+    /// mutations.
     pub unsafe fn dispatch_expired(&mut self, elapsed: u32) -> *mut KTimerEntity {
         unsafe {
             while let Some(expired) = self.pop_first() {
@@ -1022,8 +1053,11 @@ impl KTimerQueue {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `entity` is valid for mutation and is not already
-    /// linked into a queue.
+    /// `entity` must be non-null, valid for mutation, and backed by storage
+    /// that outlives its queue membership. It must not already be linked into
+    /// this or any other timer queue. Callers must hold exclusive access to the
+    /// queue and serialize insertion against scheduler interrupts and other
+    /// queue mutations.
     pub unsafe fn insert(&mut self, entity: *mut KTimerEntity) {
         unsafe { self.tree.insert(entity) }
     }
@@ -1032,12 +1066,21 @@ impl KTimerQueue {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `entity` currently belongs to this queue.
+    /// `entity` must be non-null and currently linked into this queue. Callers
+    /// must hold exclusive access to the queue and serialize removal against
+    /// scheduler interrupts and other queue mutations.
     pub unsafe fn remove(&mut self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
         unsafe { self.tree.remove(entity) }
     }
 
     /// Remove and return the earliest ktimer entity in the queue.
+    ///
+    /// # Safety
+    ///
+    /// Every entity currently linked in the queue must still be valid for
+    /// mutation and backed by storage that outlives the returned borrow.
+    /// Callers must hold exclusive access to the queue and serialize removal
+    /// against scheduler interrupts and other queue mutations.
     pub unsafe fn pop_first(&mut self) -> Option<&mut KTimerEntity> {
         unsafe { self.tree.pop_first() }
     }
