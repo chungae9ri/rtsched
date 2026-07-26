@@ -44,8 +44,15 @@ pub trait ThreadStackPort {
 
     /// # Safety
     ///
-    /// `sp` must point to writable stack storage large enough for
-    /// `Self::INITIAL_FRAME_WORDS` 32-bit words.
+    /// `sp` must be the exclusive top-of-stack pointer for writable stack
+    /// storage owned by the thread being initialized. At least
+    /// `Self::INITIAL_FRAME_WORDS` 32-bit words below `sp` must be valid to
+    /// write, and `sp` must satisfy `Self::STACK_ALIGNMENT`.
+    ///
+    /// The stack storage must outlive all scheduler use of the thread. `entry`
+    /// must use the `ThreadEntry` ABI and must not return. `arg` is passed
+    /// through unchanged; the caller must ensure it remains valid for whatever
+    /// the entry function does with it.
     unsafe fn init_thread_stack(
         sp: *mut u32,
         entry: ThreadEntry,
@@ -66,8 +73,14 @@ pub trait ContextSwitchPort {
 
     /// # Safety
     ///
-    /// `thread` must satisfy the active context-switch backend's stack,
-    /// scheduler-state, and lifetime requirements.
+    /// `thread` must refer to a live thread created by a thread builder for
+    /// the active platform. Its stack and thread storage must outlive all
+    /// scheduler use, the scheduler queues must already be initialized, and no
+    /// other scheduler thread may already be running.
+    ///
+    /// Call this only from privileged single-core startup code after the
+    /// platform exception handlers and scheduler timer are configured enough
+    /// for the context-switch backend to restore the thread.
     unsafe fn spawn_main_thread(thread: ThreadHandle) -> !;
 }
 
@@ -293,9 +306,14 @@ impl ContextSwitchPort for HostPlatform {
 ///
 /// # Safety
 ///
-/// `thread` must refer to a live thread created by a thread builder. Its stack
-/// and thread storage must outlive all scheduler use, scheduler queues must be
-/// initialized, and no other thread may already be running.
+/// `thread` must refer to a live thread created by a thread builder for the
+/// active platform. Its stack and thread storage must outlive all scheduler
+/// use, `init_ktimer_queue` and `init_cfs` must have completed, and no other
+/// scheduler thread may already be running.
+///
+/// Call this only from privileged single-core startup code after the platform
+/// exception handlers and scheduler timer are configured enough for the
+/// context-switch backend to restore the thread.
 pub unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
     unsafe { <DefaultPlatform as ContextSwitchPort>::spawn_main_thread(thread) }
 }
@@ -438,8 +456,15 @@ impl CycleCounterPort for HostPlatform {
 ///
 /// # Safety
 ///
-/// `sp` must point to writable stack storage that is large enough for
-/// `THREAD_INITIAL_FRAME_WORDS` 32-bit words.
+/// `sp` must be the exclusive top-of-stack pointer for writable stack storage
+/// owned by the thread being initialized. At least `THREAD_INITIAL_FRAME_WORDS`
+/// 32-bit words below `sp` must be valid to write, and `sp` must satisfy
+/// `THREAD_STACK_ALIGNMENT`.
+///
+/// The stack storage must outlive all scheduler use of the thread. `entry`
+/// must use the `ThreadEntry` ABI and must not return. `arg` is passed through
+/// unchanged; the caller must ensure it remains valid for whatever the entry
+/// function does with it.
 pub(crate) unsafe fn init_thread_stack(
     sp: *mut u32,
     entry: ThreadEntry,

@@ -381,7 +381,16 @@ pub trait ThreadControlBlock {
     ///
     /// # Safety
     ///
-    /// `thread` must point to valid writable storage for `Self`.
+    /// `thread` must be non-null, properly aligned, uniquely owned writable
+    /// storage for `Self`, and it must not already hold a thread that is
+    /// visible to the scheduler.
+    ///
+    /// The storage backing `thread`, the stack described by `common`, and any
+    /// scheduler-class resources in `args` must outlive all scheduler use of
+    /// the returned `ThreadCtx`. The scheduler queues required by the concrete
+    /// thread class must already be initialized, and the caller must serialize
+    /// this initialization against scheduler interrupts and other thread
+    /// creation.
     unsafe fn init(thread: *mut Self, common: ThreadCtx, args: Self::InitArgs) -> *mut ThreadCtx;
 }
 
@@ -487,8 +496,18 @@ impl CfsThreadBuilder {
     ///
     /// # Safety
     ///
-    /// `thread` and `stack` must point to valid, uniquely owned storage that
-    /// lives for as long as the thread may run.
+    /// `thread` must be non-null, properly aligned, uniquely owned writable
+    /// storage for one `CfsThread`. `stack` must be non-null, uniquely owned
+    /// writable storage for the thread stack, with a top address aligned for
+    /// the active platform and at least `THREAD_INITIAL_FRAME_WORDS` words
+    /// available for the initial frame.
+    ///
+    /// Both storage objects must remain at fixed addresses and outlive all
+    /// scheduler use of the returned handle. Call this after `init_cfs` and
+    /// while thread creation and scheduler globals are not being concurrently
+    /// accessed. The entry function must use the `ThreadEntry` ABI and must not
+    /// return; any argument pointer supplied with `with_arg` must remain valid
+    /// for the entry function's use.
     pub unsafe fn spawn<const N: usize>(
         self,
         thread: *mut MaybeUninit<CfsThread>,
@@ -504,8 +523,20 @@ impl CfsThreadBuilder {
     ///
     /// # Safety
     ///
-    /// `thread` and `stack` must point to valid, uniquely owned storage that
-    /// lives for as long as the thread may run.
+    /// `thread` must be properly aligned, uniquely owned writable storage for
+    /// one `CfsThread` when non-null. `stack` must be uniquely owned writable
+    /// stack storage when non-null, with a top address aligned for the active
+    /// platform and enough room for the initial frame.
+    ///
+    /// This method reports null pointers, undersized stacks, misaligned stack
+    /// tops, and zero priority as `ThreadSpawnError`, but it cannot validate
+    /// aliasing, dangling pointers, or lifetime requirements. Valid storage
+    /// must remain at fixed addresses and outlive all scheduler use of the
+    /// returned handle. Call this after `init_cfs` and while thread creation
+    /// and scheduler globals are not being concurrently accessed. The entry
+    /// function must use the `ThreadEntry` ABI and must not return; any
+    /// argument pointer supplied with `with_arg` must remain valid for the
+    /// entry function's use.
     pub unsafe fn try_spawn<const N: usize>(
         self,
         thread: *mut MaybeUninit<CfsThread>,
@@ -541,8 +572,20 @@ impl RtThreadBuilder {
     ///
     /// # Safety
     ///
-    /// `thread`, `stack`, and `ktimer` must point to valid, uniquely owned
-    /// storage that lives for as long as the thread may run.
+    /// `thread` must be non-null, properly aligned, uniquely owned writable
+    /// storage for one `RtThread`. `stack` must be non-null, uniquely owned
+    /// writable storage for the thread stack, with a top address aligned for
+    /// the active platform and at least `THREAD_INITIAL_FRAME_WORDS` words
+    /// available for the initial frame.
+    ///
+    /// The `RtKTimer` pointer supplied to `new` must be non-null, uniquely
+    /// owned by this thread, and not already queued for another thread. The
+    /// thread, stack, and timer storage must remain at fixed addresses and
+    /// outlive all scheduler use of the returned handle. Call this after
+    /// `init_ktimer_queue` and while thread creation and scheduler globals are
+    /// not being concurrently accessed. The entry function must use the
+    /// `ThreadEntry` ABI and must not return; any argument pointer supplied
+    /// with `with_arg` must remain valid for the entry function's use.
     pub unsafe fn spawn<const N: usize>(
         self,
         thread: *mut MaybeUninit<RtThread>,
@@ -558,8 +601,22 @@ impl RtThreadBuilder {
     ///
     /// # Safety
     ///
-    /// `thread`, `stack`, and `ktimer` must point to valid, uniquely owned
-    /// storage that lives for as long as the thread may run.
+    /// `thread` must be properly aligned, uniquely owned writable storage for
+    /// one `RtThread` when non-null. `stack` must be uniquely owned writable
+    /// stack storage when non-null, with a top address aligned for the active
+    /// platform and enough room for the initial frame.
+    ///
+    /// This method reports null pointers, undersized stacks, misaligned stack
+    /// tops, and a null timer pointer as `ThreadSpawnError`, but it cannot
+    /// validate aliasing, dangling pointers, or lifetime requirements. The
+    /// `RtKTimer` pointer supplied to `new` must be uniquely owned by this
+    /// thread and not already queued for another thread. Valid thread, stack,
+    /// and timer storage must remain at fixed addresses and outlive all
+    /// scheduler use of the returned handle. Call this after
+    /// `init_ktimer_queue` and while thread creation and scheduler globals are
+    /// not being concurrently accessed. The entry function must use the
+    /// `ThreadEntry` ABI and must not return; any argument pointer supplied
+    /// with `with_arg` must remain valid for the entry function's use.
     pub unsafe fn try_spawn<const N: usize>(
         self,
         thread: *mut MaybeUninit<RtThread>,
@@ -630,6 +687,30 @@ unsafe fn stack_top<const N: usize>(stack: *mut AlignedStack<N>) -> *mut u32 {
     unsafe { (*stack).top() }
 }
 
+/// Low-level thread initializer used by the typed thread builders.
+///
+/// Prefer `CfsThreadBuilder::spawn` or `RtThreadBuilder::spawn` unless a board
+/// port needs to provide scheduler-class-specific storage itself.
+///
+/// # Safety
+///
+/// `thread` must be non-null, properly aligned, uniquely owned writable
+/// storage for `T`, and it must not already be initialized or linked into any
+/// scheduler queue. `sp` must be the exclusive top-of-stack pointer for the
+/// thread, aligned for the active platform, with at least
+/// `THREAD_INITIAL_FRAME_WORDS` writable words below it.
+///
+/// The thread storage, stack storage, and any resources carried in `init_args`
+/// must remain at fixed addresses and outlive all scheduler use of the returned
+/// `ThreadCtx`. `init_args` must satisfy `T::init` for the concrete scheduler
+/// class, including a non-zero CFS priority or a live, unqueued RT timer as
+/// appropriate.
+///
+/// Call this only after the scheduler queues required by `T` have been
+/// initialized and while thread creation and scheduler globals are not being
+/// concurrently accessed. `entry` must use the `ThreadEntry` ABI and must not
+/// return. `arg` is passed through unchanged; the caller must keep it valid for
+/// whatever `entry` does with it.
 pub unsafe fn forkyi<T: ThreadControlBlock>(
     thread: *mut T,
     sp: *mut u32,
@@ -767,6 +848,32 @@ pub(crate) unsafe fn thread_ref_from_thread_ctx<'a>(thread: *mut ThreadCtx) -> T
             ThreadRef::Rt(&*rt_thread_from_thread_ctx(thread))
         }
     }
+}
+
+/// Return a handle to the thread currently selected by the scheduler.
+///
+/// This reports the scheduler's current thread pointer. It returns `None`
+/// before the first thread has been started or after test code explicitly
+/// clears scheduler state.
+pub fn current_thread() -> Option<ThreadHandle> {
+    critical_section(|| unsafe {
+        if CURRENT_THREAD_CTX.is_null() {
+            None
+        } else {
+            Some(ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX))
+        }
+    })
+}
+
+/// Return the identifier of the thread currently selected by the scheduler.
+pub fn current_thread_id() -> Option<ThreadId> {
+    critical_section(|| unsafe {
+        if CURRENT_THREAD_CTX.is_null() {
+            None
+        } else {
+            Some((*CURRENT_THREAD_CTX).id())
+        }
+    })
 }
 
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
@@ -1157,6 +1264,42 @@ mod tests {
     }
 
     #[test]
+    fn current_thread_helpers_report_missing_current_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+
+        assert_eq!(current_thread(), None);
+        assert_eq!(current_thread_id(), None);
+    }
+
+    #[test]
+    fn current_thread_helpers_report_current_cfs_thread() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut cfs = cfs_thread("cfs", 1);
+
+        unsafe {
+            CURRENT_THREAD_CTX = &mut cfs.thread;
+            CURRENT_THREAD_IS_CFS = true;
+        }
+
+        let handle = current_thread().expect("current CFS thread should be set");
+        assert_eq!(handle.id(), cfs.thread.id());
+        assert_eq!(handle.name(), "cfs");
+        assert_eq!(handle.state(), ThreadState::Ready);
+        assert!(handle.is_cfs());
+        assert_eq!(current_thread_id(), Some(cfs.thread.id()));
+
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    #[test]
     fn rt_thread_helpers_access_runtime_and_ktimer_entity() {
         let _guard = TEST_LOCK.lock().unwrap();
         let mut rt = rt_thread("rt");
@@ -1177,6 +1320,12 @@ mod tests {
         assert!(ptr::eq(rt.ktimer_entity().unwrap().as_ptr(), &ktimer));
         assert!(set_rt_thread_start_time(42));
         assert_eq!(rt.runtime, 42);
+        assert_eq!(current_thread_id(), Some(rt.thread.id()));
+        assert!(
+            current_thread()
+                .expect("current RT thread should be set")
+                .is_rt()
+        );
 
         unsafe {
             CURRENT_THREAD_CTX = ptr::null_mut();

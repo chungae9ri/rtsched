@@ -28,9 +28,12 @@ pub(crate) static mut IDLE_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 /// # Safety
 ///
 /// Call this during single-threaded scheduler setup after `init_ktimer_queue`
-/// and before scheduler interrupts or threads can observe the global CFS state.
-/// Reinitializing while CFS entities are queued invalidates their intrusive
-/// queue links.
+/// and before any scheduler interrupt, thread, or other core can observe the
+/// global CFS state.
+///
+/// Do not call this while CFS threads are queued, running, or waiting.
+/// Reinitializing with live CFS entities invalidates their intrusive run-queue
+/// links and loses scheduler accounting.
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
         init_cfs_rq();
@@ -50,10 +53,14 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
 ///
 /// # Safety
 ///
-/// `thread` must refer to a live CFS thread created by a thread builder, and
-/// its backing storage and stack must outlive all scheduler use. Call this only
-/// after the CFS run queue has been initialized and while scheduler state is not
-/// being concurrently modified.
+/// `thread` must refer to a live CFS thread created by a thread builder. The
+/// thread should be newly spawned or otherwise quiescent: it must not be the
+/// currently running thread, must not be waiting, and must not also be used as
+/// normal runnable work.
+///
+/// The thread's backing storage and stack must outlive all scheduler use. Call
+/// this after `init_cfs`, before starting the scheduler, and while scheduler
+/// state is not being concurrently modified.
 pub unsafe fn register_idle_thread(thread: ThreadHandle) {
     let thread = thread.as_ptr();
 

@@ -257,6 +257,15 @@ pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
 /// Enqueue a thread into the scheduler run queue.
 ///
 /// The thread's scheduler entity vruntime field is used as the red-black tree key.
+///
+/// # Safety
+///
+/// `thread` must be non-null and must point to the `ThreadCtx` embedded in a
+/// live `CfsThread` whose storage outlives its run-queue membership. Its
+/// scheduler entity must not already be linked into the run queue.
+///
+/// Call this only after the CFS run queue has been initialized and while
+/// scheduler state is not being concurrently modified.
 pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
     unsafe {
         (*thread).set_state(ThreadState::Ready);
@@ -274,6 +283,12 @@ pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
 }
 
 /// Remove a thread from the scheduler run queue if it is currently queued.
+///
+/// # Safety
+///
+/// `thread` must be non-null and must point to the `ThreadCtx` embedded in a
+/// live `CfsThread`. Callers must serialize removal against scheduler
+/// interrupts and other run-queue mutations.
 #[allow(dead_code)]
 pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
     unsafe {
@@ -293,6 +308,16 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
 /// Since this is called from dispatch_expired, WAIT_KTIMER is already popped
 /// from the KTIMER_QUEUE, so calling program_wait_ktimer() at the end of this function
 /// will generate a program panic.
+///
+/// # Safety
+///
+/// `thread` must be non-null, currently waiting, and must point to the
+/// `ThreadCtx` embedded in a live `CfsThread`. Its wait entity must already
+/// have been removed from the wait queue, and its scheduler entity must not be
+/// linked into the run queue.
+///
+/// Call this only from the wait-timer dispatch path while scheduler state is
+/// serialized.
 pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
     unsafe {
         let entity = cfs_sched_entity(thread);
