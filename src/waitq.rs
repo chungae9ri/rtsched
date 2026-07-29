@@ -8,8 +8,8 @@ use core::ptr;
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::thread::{
-    ThreadCtx, ThreadRef, cfs_wait_entity, rt_wait_entity, thread_from_wait_entity,
-    thread_ref_from_thread_ctx,
+    ThreadHandle, ThreadRef, cfs_wait_entity, rt_wait_entity, thread_handle_from_wait_entity,
+    thread_ref_from_handle,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,7 +126,7 @@ unsafe impl RBTreeNode for WaitEntity {
 ///
 /// The caller must ensure that any provided thread pointer remains valid and
 /// that the wait queue is not mutated during traversal.
-pub(crate) unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
+pub(crate) unsafe fn traverse_wait_queue(cursor: Option<ThreadHandle>) -> Option<ThreadHandle> {
     unsafe {
         let tree = &*WAIT_QUEUE.get();
         let entity = match cursor {
@@ -137,7 +137,7 @@ pub(crate) unsafe fn traverse_wait_queue(cursor: Option<*mut ThreadCtx>) -> Opti
         if entity.is_null() {
             None
         } else {
-            Some(thread_from_wait_entity(entity))
+            Some(thread_handle_from_wait_entity(entity))
         }
     }
 }
@@ -150,15 +150,15 @@ where
     critical_section(|| unsafe {
         let mut cursor = traverse_wait_queue(None);
         while let Some(thread) = cursor {
-            f(thread_ref_from_thread_ctx(thread));
+            f(thread_ref_from_handle(thread));
             cursor = traverse_wait_queue(Some(thread));
         }
     });
 }
 
-pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
+pub(crate) unsafe fn wait_entity(thread: ThreadHandle) -> *mut WaitEntity {
     unsafe {
-        if (*thread).is_cfs {
+        if (*thread.as_ptr()).is_cfs {
             cfs_wait_entity(thread)
         } else {
             rt_wait_entity(thread)
@@ -166,23 +166,23 @@ pub(crate) unsafe fn wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
     }
 }
 
-pub(crate) unsafe fn pop_expired_wait_thread(now_ticks: u64) -> *mut ThreadCtx {
+pub(crate) unsafe fn pop_expired_wait_thread(now_ticks: u64) -> Option<ThreadHandle> {
     unsafe {
         let tree = &mut *WAIT_QUEUE.get();
         let first = tree.first();
         if first.is_null() || !(*first).is_expired_at(now_ticks) {
-            return ptr::null_mut();
+            return None;
         }
 
         let Some(entity) = tree.pop_first() else {
-            return ptr::null_mut();
+            return None;
         };
 
-        thread_from_wait_entity(entity as *mut WaitEntity)
+        Some(thread_handle_from_wait_entity(entity as *mut WaitEntity))
     }
 }
 
-pub(crate) unsafe fn insert_wait_thread(thread: *mut ThreadCtx) {
+pub(crate) unsafe fn insert_wait_thread(thread: ThreadHandle) {
     unsafe {
         let wait_entity = wait_entity(thread);
         let tree = &mut *WAIT_QUEUE.get();
@@ -195,7 +195,7 @@ pub(crate) unsafe fn insert_wait_thread(thread: *mut ThreadCtx) {
     }
 }
 
-pub(crate) unsafe fn remove_wait_thread(thread: *mut ThreadCtx) {
+pub(crate) unsafe fn remove_wait_thread(thread: ThreadHandle) {
     unsafe {
         let wait_entity = wait_entity(thread);
         (*WAIT_QUEUE.get()).remove(wait_entity);
@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use crate::TEST_LOCK;
     use crate::runq::SchedEntity;
-    use crate::thread::{CfsThread, ThreadState};
+    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadState};
     use std::vec::Vec;
 
     fn reset_wait_queue() {
@@ -232,6 +232,10 @@ mod tests {
         thread.wait_entity.wake_at = wake_at;
         thread.wait_entity.waitevt = waitevt;
         thread
+    }
+
+    unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
+        unsafe { ThreadHandle::from_thread_ctx(thread) }
     }
 
     fn collect_wake_at() -> Vec<u64> {
@@ -274,9 +278,9 @@ mod tests {
         let mut third = cfs_thread("third", 10, 1);
 
         unsafe {
-            insert_wait_thread(&mut first.thread);
-            insert_wait_thread(&mut second.thread);
-            insert_wait_thread(&mut third.thread);
+            insert_wait_thread(thread_handle(&mut first.thread));
+            insert_wait_thread(thread_handle(&mut second.thread));
+            insert_wait_thread(thread_handle(&mut third.thread));
         }
 
         assert_eq!(collect_wake_at(), [5, 10, 10]);
@@ -288,9 +292,9 @@ mod tests {
         let third_thread = unsafe { traverse_wait_queue(Some(second_thread)).unwrap() };
 
         unsafe {
-            assert_eq!((*first_thread).name, "second");
-            assert_eq!((*second_thread).name, "third");
-            assert_eq!((*third_thread).name, "first");
+            assert_eq!((*first_thread.as_ptr()).name, "second");
+            assert_eq!((*second_thread.as_ptr()).name, "third");
+            assert_eq!((*third_thread.as_ptr()).name, "first");
             assert!(traverse_wait_queue(Some(third_thread)).is_none());
         }
     }
@@ -305,9 +309,9 @@ mod tests {
         let mut third = cfs_thread("third", 7, 0);
 
         unsafe {
-            insert_wait_thread(&mut first.thread);
-            insert_wait_thread(&mut second.thread);
-            insert_wait_thread(&mut third.thread);
+            insert_wait_thread(thread_handle(&mut first.thread));
+            insert_wait_thread(thread_handle(&mut second.thread));
+            insert_wait_thread(thread_handle(&mut third.thread));
         }
 
         assert_eq!(first.wait_entity.wake_at, 3);
@@ -326,13 +330,16 @@ mod tests {
         let mut pending = cfs_thread("pending", 4, 0);
 
         unsafe {
-            insert_wait_thread(&mut pending.thread);
-            insert_wait_thread(&mut expired.thread);
+            insert_wait_thread(thread_handle(&mut pending.thread));
+            insert_wait_thread(thread_handle(&mut expired.thread));
         }
 
         let popped = unsafe { pop_expired_wait_thread(0) };
-        assert!(ptr::eq(popped, &expired.thread));
-        assert_eq!(unsafe { pop_expired_wait_thread(0) }, ptr::null_mut());
+        assert!(ptr::eq(
+            popped.expect("expired thread should be popped").as_ptr(),
+            &expired.thread
+        ));
+        assert_eq!(unsafe { pop_expired_wait_thread(0) }, None);
         assert_eq!(collect_wake_at(), [4]);
     }
 
@@ -345,9 +352,9 @@ mod tests {
         let mut second = cfs_thread("second", 2, 0);
 
         unsafe {
-            insert_wait_thread(&mut first.thread);
-            insert_wait_thread(&mut second.thread);
-            remove_wait_thread(&mut first.thread);
+            insert_wait_thread(thread_handle(&mut first.thread));
+            insert_wait_thread(thread_handle(&mut second.thread));
+            remove_wait_thread(thread_handle(&mut first.thread));
         }
 
         assert_eq!(collect_wake_at(), [2]);

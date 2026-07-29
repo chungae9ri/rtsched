@@ -16,7 +16,7 @@ use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
 use crate::thread::{
-    RtThread, ThreadCtx, ThreadState, rt_ktimer_entity, rt_thread_from_thread_ctx,
+    RtThread, ThreadCtx, ThreadHandle, ThreadState, rt_ktimer_entity, rt_thread_from_handle,
     set_rt_ktimer_entity,
 };
 use crate::waitq::{
@@ -301,7 +301,7 @@ impl RtKTimer {
         self.thread_ctx = thread_ctx;
         if !thread_ctx.is_null() {
             unsafe {
-                set_rt_ktimer_entity(thread_ctx, self.entity_mut());
+                set_rt_ktimer_entity(ThreadHandle::from_thread_ctx(thread_ctx), self.entity_mut());
             }
         }
     }
@@ -461,18 +461,18 @@ pub(crate) unsafe fn program_wait_ktimer() {
 pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
     unsafe {
         loop {
-            let wait_thread = pop_expired_wait_thread(queue.now_ticks());
-            if wait_thread.is_null() {
+            let Some(wait_thread) = pop_expired_wait_thread(queue.now_ticks()) else {
                 break;
-            }
+            };
+            let wait_thread_ptr = wait_thread.as_ptr();
 
-            (*wait_thread).set_state(ThreadState::Ready);
-            crate::trace::record_wakeup(wait_thread);
-            if (*wait_thread).is_cfs {
+            (*wait_thread_ptr).set_state(ThreadState::Ready);
+            crate::trace::record_wakeup(wait_thread_ptr);
+            if (*wait_thread_ptr).is_cfs {
                 enqueue_runq_from_waitq(wait_thread);
             } else {
                 let ktimer_entity = rt_ktimer_entity(wait_thread);
-                let rt_thread = rt_thread_from_thread_ctx(wait_thread);
+                let rt_thread = rt_thread_from_handle(wait_thread);
 
                 (*rt_thread).runtime = (*rt_thread).runtime.saturating_add(elapsed);
                 record_rt_budget_overrun(ktimer_entity, rt_thread);
@@ -541,7 +541,7 @@ unsafe fn normalize_next_ktimer(
                 (*entity).set_deadline_after(queue.now_ticks(), cfs_period_ticks(entity));
             } else {
                 let rt_thread_ctx = (*KTimerEntity::rt_ktimer(entity)).thread_ctx();
-                let rt_thread = rt_thread_from_thread_ctx(rt_thread_ctx);
+                let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(rt_thread_ctx));
 
                 record_rt_deadline_miss(entity, rt_thread);
                 (*rt_thread).runtime = 0;
@@ -565,9 +565,10 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
     }
 }
 
-pub(crate) fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn dequeue_ktimerq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
-        if thread.is_null() || (*thread).is_cfs {
+        let thread_ptr = thread.as_ptr();
+        if (*thread_ptr).is_cfs {
             return Err(WaitQueueError::NotFound);
         }
 
@@ -577,7 +578,7 @@ pub(crate) fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), Wai
         }
 
         remove_ktimer(ktimer_entity);
-        (*thread).set_state(ThreadState::Waiting);
+        (*thread_ptr).set_state(ThreadState::Waiting);
 
         insert_wait_thread(thread);
         program_wait_ktimer();
@@ -587,12 +588,13 @@ pub(crate) fn dequeue_ktimerq_to_waitq(thread: *mut ThreadCtx) -> Result<(), Wai
 }
 
 pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
-    dequeue_ktimerq_to_waitq(thread.thread_ctx_mut())
+    unsafe { dequeue_ktimerq_to_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
-pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
-        if thread.is_null() || (*thread).is_cfs {
+        let thread_ptr = thread.as_ptr();
+        if (*thread_ptr).is_cfs {
             return Err(WaitQueueError::NotFound);
         }
 
@@ -603,8 +605,8 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), W
 
         remove_wait_thread(thread);
 
-        (*thread).set_state(ThreadState::Ready);
-        crate::trace::record_wakeup(thread);
+        (*thread_ptr).set_state(ThreadState::Ready);
+        crate::trace::record_wakeup(thread_ptr);
         reinsert_ktimer(ktimer_entity);
         program_wait_ktimer();
 
@@ -613,7 +615,7 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: *mut ThreadCtx) -> Result<(), W
 }
 
 pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
-    enqueue_ktimerq_from_waitq(thread.thread_ctx_mut())
+    unsafe { enqueue_ktimerq_from_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
 pub fn next_ktimer_reload() -> Option<u32> {
@@ -798,7 +800,8 @@ unsafe fn yield_ktimer_in_queue(
             );
         } else {
             let current_rt_thread_ctx = (*KTimerEntity::rt_ktimer(entity)).thread_ctx();
-            let current_rt_thread = rt_thread_from_thread_ctx(current_rt_thread_ctx);
+            let current_rt_thread =
+                rt_thread_from_handle(ThreadHandle::from_thread_ctx(current_rt_thread_ctx));
 
             (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
             record_rt_budget_overrun(entity, current_rt_thread);
@@ -1029,7 +1032,8 @@ impl KTimerQueue {
                     }
                 } else {
                     let thread_ctx = (*KTimerEntity::rt_ktimer(expired)).thread_ctx();
-                    let rt_thread = rt_thread_from_thread_ctx(thread_ctx);
+                    let rt_thread =
+                        rt_thread_from_handle(ThreadHandle::from_thread_ctx(thread_ctx));
                     if (*expired).is_active() {
                         record_rt_deadline_miss(expired, rt_thread);
                     }
@@ -1108,7 +1112,7 @@ impl Default for KTimerQueue {
 mod tests {
     use super::*;
     use crate::TEST_LOCK;
-    use crate::thread::{RtThread, ThreadState};
+    use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
     use std::vec::Vec;
 
@@ -1126,6 +1130,10 @@ mod tests {
             ktimer_entity: ptr::null_mut(),
             runtime: 0,
         }
+    }
+
+    unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
+        unsafe { ThreadHandle::from_thread_ctx(thread) }
     }
 
     fn reset_wait_queue() {
@@ -1584,7 +1592,7 @@ mod tests {
             rt.runtime = 20;
             rt.thread.state = ThreadState::Waiting;
             rt.wait_entity.set_wake_after(0, 50);
-            insert_wait_thread(&mut rt.thread);
+            insert_wait_thread(thread_handle(&mut rt.thread));
         }
 
         queue.advance_time(50);
@@ -1616,7 +1624,7 @@ mod tests {
             rt.runtime = 20;
             rt.thread.state = ThreadState::Waiting;
             rt.wait_entity.set_wake_after(0, 50);
-            insert_wait_thread(&mut rt.thread);
+            insert_wait_thread(thread_handle(&mut rt.thread));
         }
 
         queue.advance_time(50);
@@ -1652,11 +1660,9 @@ mod tests {
 
             assert!(rt.thread.state == ThreadState::Waiting);
             assert!(!(*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
-            assert!((*WAIT_QUEUE.get()).contains(wait_entity(&mut rt.thread)));
-            assert!(ptr::eq(
-                rt_ktimer_entity(&mut rt.thread),
-                ktimer.entity_mut()
-            ));
+            let handle = thread_handle(&mut rt.thread);
+            assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+            assert!(ptr::eq(rt_ktimer_entity(handle), ktimer.entity_mut()));
 
             assert!(enqueue_rt_thread_from_waitq(&mut rt).is_ok());
 
@@ -1666,7 +1672,7 @@ mod tests {
                 "deadlines after enqueue from waitq: {:?}",
                 collect_deadlines_at(&*KTIMER_QUEUE.get())
             );
-            assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(&mut rt.thread)));
+            assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         }
     }
 

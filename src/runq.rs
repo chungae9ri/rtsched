@@ -10,8 +10,8 @@ use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
-    thread_from_cfs_sched_entity,
+    CfsThread, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
+    thread_handle_from_cfs_sched_entity,
 };
 use crate::waitq::{WaitQueueError, insert_wait_thread};
 
@@ -175,28 +175,28 @@ unsafe impl RBTreeNode for SchedEntity {
 /// The caller must ensure that any provided thread pointer still refers to a
 /// valid thread control block and that the run queue is not concurrently
 /// mutated in a way that invalidates the traversal step.
-pub(crate) unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Option<*mut ThreadCtx> {
+pub(crate) unsafe fn traverse_run_queue(cursor: Option<ThreadHandle>) -> Option<ThreadHandle> {
     unsafe {
         let tree = &*CFS_RUN_QUEUE.get();
         match cursor {
             None => {
                 if CURRENT_THREAD_IS_CFS && !CURRENT_THREAD_CTX.is_null() {
-                    Some(CURRENT_THREAD_CTX)
+                    Some(ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX))
                 } else {
                     let first = tree.first();
                     if first.is_null() {
                         None
                     } else {
-                        Some(thread_from_cfs_sched_entity(first))
+                        Some(thread_handle_from_cfs_sched_entity(first))
                     }
                 }
             }
-            Some(thread) if thread == CURRENT_THREAD_CTX => {
+            Some(thread) if thread.as_ptr() == CURRENT_THREAD_CTX => {
                 let first = tree.first();
                 if first.is_null() {
                     None
                 } else {
-                    Some(thread_from_cfs_sched_entity(first))
+                    Some(thread_handle_from_cfs_sched_entity(first))
                 }
             }
             Some(thread) => {
@@ -204,7 +204,7 @@ pub(crate) unsafe fn traverse_run_queue(cursor: Option<*mut ThreadCtx>) -> Optio
                 if next.is_null() {
                     None
                 } else {
-                    Some(thread_from_cfs_sched_entity(next))
+                    Some(thread_handle_from_cfs_sched_entity(next))
                 }
             }
         }
@@ -219,7 +219,7 @@ where
     critical_section(|| unsafe {
         let mut cursor = traverse_run_queue(None);
         while let Some(thread) = cursor {
-            f(&*cfs_thread_from_thread_ctx(thread));
+            f(&*cfs_thread_from_handle(thread));
             cursor = traverse_run_queue(Some(thread));
         }
     });
@@ -266,9 +266,10 @@ pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
 ///
 /// Call this only after the CFS run queue has been initialized and while
 /// scheduler state is not being concurrently modified.
-pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
+pub unsafe fn enqueue_thread(thread: ThreadHandle) {
     unsafe {
-        (*thread).set_state(ThreadState::Ready);
+        let thread_ptr = thread.as_ptr();
+        (*thread_ptr).set_state(ThreadState::Ready);
         let entity = cfs_sched_entity(thread);
         let tree = &mut *CFS_RUN_QUEUE.get();
         debug_assert!(
@@ -290,9 +291,10 @@ pub unsafe fn enqueue_thread(thread: *mut ThreadCtx) {
 /// live `CfsThread`. Callers must serialize removal against scheduler
 /// interrupts and other run-queue mutations.
 #[allow(dead_code)]
-pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
+pub unsafe fn dequeue_thread(thread: ThreadHandle) {
     unsafe {
-        if (*thread).state == ThreadState::Ready {
+        let thread_ptr = thread.as_ptr();
+        if (*thread_ptr).state == ThreadState::Ready {
             let entity = cfs_sched_entity(thread);
             let tree = &mut *CFS_RUN_QUEUE.get();
             if tree.contains(entity.cast_const()) {
@@ -318,8 +320,9 @@ pub unsafe fn dequeue_thread(thread: *mut ThreadCtx) {
 ///
 /// Call this only from the wait-timer dispatch path while scheduler state is
 /// serialized.
-pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
+pub unsafe fn enqueue_runq_from_waitq(thread: ThreadHandle) {
     unsafe {
+        let thread_ptr = thread.as_ptr();
         let entity = cfs_sched_entity(thread);
         let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_add((*entity).priority);
         let tree = &mut *CFS_RUN_QUEUE.get();
@@ -330,7 +333,7 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
 
         (*entity).reset_links();
         *CFS_RUN_QUEUE.priority_sum() = priority_sum;
-        (*thread).set_state(ThreadState::Ready);
+        (*thread_ptr).set_state(ThreadState::Ready);
 
         // Update cfs_rq with priority_sum
         let mut updated = RBTree::new();
@@ -352,18 +355,15 @@ pub unsafe fn enqueue_runq_from_waitq(thread: *mut ThreadCtx) {
     }
 }
 
-pub(crate) fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQueueError> {
+pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
-        if thread.is_null() {
-            return Err(WaitQueueError::NotFound);
-        }
-
+        let thread_ptr = thread.as_ptr();
         let entity = cfs_sched_entity(thread);
-        // If (*thread).state is Running, it is not in the runq.
-        if (*thread).state == ThreadState::Ready {
+        // If the thread is Running, it is not in the runq.
+        if (*thread_ptr).state == ThreadState::Ready {
             (*CFS_RUN_QUEUE.get()).remove(entity);
         }
-        (*thread).set_state(ThreadState::Waiting);
+        (*thread_ptr).set_state(ThreadState::Waiting);
 
         insert_wait_thread(thread);
         let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
@@ -375,7 +375,7 @@ pub(crate) fn dequeue_runq_to_waitq(thread: *mut ThreadCtx) -> Result<(), WaitQu
 }
 
 pub fn dequeue_cfs_thread_to_waitq(thread: &mut CfsThread) -> Result<(), WaitQueueError> {
-    dequeue_runq_to_waitq(thread.thread_ctx_mut())
+    unsafe { dequeue_runq_to_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
 #[cfg(test)]
@@ -383,7 +383,7 @@ mod tests {
     use super::*;
     use crate::TEST_LOCK;
     use crate::ktimer::init_ktimer_queue;
-    use crate::thread::{CfsThread, ThreadState};
+    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, wait_entity};
     use std::vec::Vec;
 
@@ -416,6 +416,10 @@ mod tests {
         };
         thread.sched_entity.vruntime = vruntime;
         thread
+    }
+
+    unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
+        unsafe { ThreadHandle::from_thread_ctx(thread) }
     }
 
     fn collect_thread_names() -> Vec<&'static str> {
@@ -455,9 +459,9 @@ mod tests {
         let mut third = cfs_thread("third", 8, 20);
 
         unsafe {
-            enqueue_thread(&mut first.thread);
-            enqueue_thread(&mut second.thread);
-            enqueue_thread(&mut third.thread);
+            enqueue_thread(thread_handle(&mut first.thread));
+            enqueue_thread(thread_handle(&mut second.thread));
+            enqueue_thread(thread_handle(&mut third.thread));
         }
 
         assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 14);
@@ -484,7 +488,7 @@ mod tests {
         unsafe {
             CURRENT_THREAD_CTX = &mut running.thread;
             CURRENT_THREAD_IS_CFS = true;
-            enqueue_thread(&mut queued.thread);
+            enqueue_thread(thread_handle(&mut queued.thread));
         }
 
         assert_eq!(collect_thread_names(), ["running", "queued"]);
@@ -498,9 +502,9 @@ mod tests {
         let mut second = cfs_thread("second", 5, 10);
 
         unsafe {
-            enqueue_thread(&mut first.thread);
-            enqueue_thread(&mut second.thread);
-            dequeue_thread(&mut first.thread);
+            enqueue_thread(thread_handle(&mut first.thread));
+            enqueue_thread(thread_handle(&mut second.thread));
+            dequeue_thread(thread_handle(&mut first.thread));
         }
 
         assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 5);
@@ -521,14 +525,15 @@ mod tests {
         let mut thread = cfs_thread("waiting", 3, 0);
 
         unsafe {
-            enqueue_thread(&mut thread.thread);
-            assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(&mut thread.thread)));
+            let handle = thread_handle(&mut thread.thread);
+            enqueue_thread(handle);
+            assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
 
             assert!(dequeue_cfs_thread_to_waitq(&mut thread).is_ok());
 
             assert!(thread.thread.state == ThreadState::Waiting);
-            assert!(!(*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(&mut thread.thread)));
-            assert!((*WAIT_QUEUE.get()).contains(wait_entity(&mut thread.thread)));
+            assert!(!(*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
+            assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
         }
     }
@@ -541,7 +546,7 @@ mod tests {
         let mut detached = cfs_thread("detached", 2, 0);
 
         unsafe {
-            enqueue_thread(&mut queued.thread);
+            enqueue_thread(thread_handle(&mut queued.thread));
             update_from_leftmost(&mut detached.sched_entity);
         }
 

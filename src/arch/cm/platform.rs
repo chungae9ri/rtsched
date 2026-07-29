@@ -289,7 +289,7 @@ impl ContextSwitchPort for CortexMPlatform {
     }
 
     unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
-        unsafe { super::ctx_switch::spawn_main_thread(thread.as_ptr()) }
+        unsafe { super::ctx_switch::spawn_main_thread(thread) }
     }
 }
 
