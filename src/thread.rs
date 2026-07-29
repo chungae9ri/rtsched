@@ -415,7 +415,7 @@ impl ThreadControlBlock for CfsThread {
                 },
             );
             let common_thread = ptr::addr_of_mut!((*thread).thread);
-            enqueue_thread(common_thread);
+            enqueue_thread(ThreadHandle::from_thread_ctx(common_thread));
             common_thread
         }
     }
@@ -640,7 +640,7 @@ unsafe fn try_spawn_thread<T: ThreadControlBlock, const N: usize>(
     validate_stack(stack)?;
 
     unsafe {
-        let thread = forkyi(
+        let handle = forkyi(
             thread.cast::<T>(),
             stack_top(stack),
             start.entry,
@@ -649,7 +649,7 @@ unsafe fn try_spawn_thread<T: ThreadControlBlock, const N: usize>(
             init_args,
         );
 
-        Ok(ThreadHandle::from_thread_ctx(thread))
+        Ok(handle)
     }
 }
 
@@ -702,7 +702,7 @@ unsafe fn stack_top<const N: usize>(stack: *mut AlignedStack<N>) -> *mut u32 {
 ///
 /// The thread storage, stack storage, and any resources carried in `init_args`
 /// must remain at fixed addresses and outlive all scheduler use of the returned
-/// `ThreadCtx`. `init_args` must satisfy `T::init` for the concrete scheduler
+/// handle. `init_args` must satisfy `T::init` for the concrete scheduler
 /// class, including a non-zero CFS priority or a live, unqueued RT timer as
 /// appropriate.
 ///
@@ -718,7 +718,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
     arg: *mut c_void,
     name: &'static str,
     init_args: T::InitArgs,
-) -> *mut ThreadCtx {
+) -> ThreadHandle {
     debug_assert!(!thread.is_null(), "thread storage pointer must be non-null");
     debug_assert!(!sp.is_null(), "thread stack pointer must be non-null");
     debug_assert_eq!(
@@ -739,40 +739,37 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             state: ThreadState::Ready,
             is_cfs: T::IS_CFS,
         };
-        T::init(thread, common, init_args)
+        ThreadHandle::from_thread_ctx(T::init(thread, common, init_args))
     }
 }
 
-pub(crate) unsafe fn cfs_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut CfsThread {
-    debug_assert!(!thread.is_null());
+pub(crate) unsafe fn cfs_thread_from_handle(thread: ThreadHandle) -> *mut CfsThread {
+    let thread = thread.as_ptr();
 
     (thread as *mut u8)
         .wrapping_sub(offset_of!(CfsThread, thread))
         .cast::<CfsThread>()
 }
 
-pub(crate) unsafe fn cfs_sched_entity(thread: *mut ThreadCtx) -> *mut SchedEntity {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn cfs_sched_entity(thread: ThreadHandle) -> *mut SchedEntity {
     unsafe {
-        let cfs_thread = cfs_thread_from_thread_ctx(thread);
+        let cfs_thread = cfs_thread_from_handle(thread);
         ptr::addr_of_mut!((*cfs_thread).sched_entity)
     }
 }
 
-pub(crate) unsafe fn thread_from_cfs_sched_entity(entity: *mut SchedEntity) -> *mut ThreadCtx {
+pub(crate) unsafe fn thread_handle_from_cfs_sched_entity(entity: *mut SchedEntity) -> ThreadHandle {
     debug_assert!(!entity.is_null());
 
     let cfs_thread = (entity as *mut u8)
         .wrapping_sub(offset_of!(CfsThread, sched_entity))
         .cast::<CfsThread>();
 
-    unsafe { ptr::addr_of_mut!((*cfs_thread).thread) }
+    unsafe { ThreadHandle::from_thread_ctx(ptr::addr_of_mut!((*cfs_thread).thread)) }
 }
 
-pub(crate) unsafe fn cfs_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn cfs_wait_entity(thread: ThreadHandle) -> *mut WaitEntity {
+    let thread = thread.as_ptr();
     let cfs_thread = (thread as *mut u8)
         .wrapping_sub(offset_of!(CfsThread, thread))
         .cast::<CfsThread>();
@@ -780,9 +777,8 @@ pub(crate) unsafe fn cfs_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity 
     unsafe { ptr::addr_of_mut!((*cfs_thread).wait_entity) }
 }
 
-pub(crate) unsafe fn rt_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn rt_wait_entity(thread: ThreadHandle) -> *mut WaitEntity {
+    let thread = thread.as_ptr();
     let rt_thread = (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>();
@@ -790,9 +786,8 @@ pub(crate) unsafe fn rt_wait_entity(thread: *mut ThreadCtx) -> *mut WaitEntity {
     unsafe { ptr::addr_of_mut!((*rt_thread).wait_entity) }
 }
 
-pub(crate) unsafe fn rt_ktimer_entity(thread: *mut ThreadCtx) -> *mut KTimerEntity {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn rt_ktimer_entity(thread: ThreadHandle) -> *mut KTimerEntity {
+    let thread = thread.as_ptr();
     let rt_thread = (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>();
@@ -800,12 +795,8 @@ pub(crate) unsafe fn rt_ktimer_entity(thread: *mut ThreadCtx) -> *mut KTimerEnti
     unsafe { (*rt_thread).ktimer_entity }
 }
 
-pub(crate) unsafe fn set_rt_ktimer_entity(
-    thread: *mut ThreadCtx,
-    ktimer_entity: *mut KTimerEntity,
-) {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn set_rt_ktimer_entity(thread: ThreadHandle, ktimer_entity: *mut KTimerEntity) {
+    let thread = thread.as_ptr();
     let rt_thread = (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>();
@@ -815,7 +806,7 @@ pub(crate) unsafe fn set_rt_ktimer_entity(
     }
 }
 
-pub(crate) unsafe fn thread_from_wait_entity(entity: *mut WaitEntity) -> *mut ThreadCtx {
+pub(crate) unsafe fn thread_handle_from_wait_entity(entity: *mut WaitEntity) -> ThreadHandle {
     debug_assert!(!entity.is_null());
 
     debug_assert_eq!(
@@ -827,25 +818,22 @@ pub(crate) unsafe fn thread_from_wait_entity(entity: *mut WaitEntity) -> *mut Th
         .wrapping_sub(offset_of!(CfsThread, wait_entity))
         .cast::<CfsThread>();
 
-    unsafe { ptr::addr_of_mut!((*thread).thread) }
+    unsafe { ThreadHandle::from_thread_ctx(ptr::addr_of_mut!((*thread).thread)) }
 }
 
-pub(crate) unsafe fn rt_thread_from_thread_ctx(thread: *mut ThreadCtx) -> *mut RtThread {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn rt_thread_from_handle(thread: ThreadHandle) -> *mut RtThread {
+    let thread = thread.as_ptr();
     (thread as *mut u8)
         .wrapping_sub(offset_of!(RtThread, thread))
         .cast::<RtThread>()
 }
 
-pub(crate) unsafe fn thread_ref_from_thread_ctx<'a>(thread: *mut ThreadCtx) -> ThreadRef<'a> {
-    debug_assert!(!thread.is_null());
-
+pub(crate) unsafe fn thread_ref_from_handle<'a>(thread: ThreadHandle) -> ThreadRef<'a> {
     unsafe {
-        if (*thread).is_cfs {
-            ThreadRef::Cfs(&*cfs_thread_from_thread_ctx(thread))
+        if (*thread.as_ptr()).is_cfs {
+            ThreadRef::Cfs(&*cfs_thread_from_handle(thread))
         } else {
-            ThreadRef::Rt(&*rt_thread_from_thread_ctx(thread))
+            ThreadRef::Rt(&*rt_thread_from_handle(thread))
         }
     }
 }
@@ -879,7 +867,8 @@ pub fn current_thread_id() -> Option<ThreadId> {
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
     unsafe {
         if !CURRENT_THREAD_CTX.is_null() && !CURRENT_THREAD_IS_CFS {
-            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+            let rt_thread = rt_thread_from_handle(current_thread);
             (*rt_thread).runtime = start_time;
             true
         } else {
@@ -893,7 +882,8 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
         if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
             None
         } else {
-            let rt_thread = rt_thread_from_thread_ctx(CURRENT_THREAD_CTX);
+            let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+            let rt_thread = rt_thread_from_handle(current_thread);
             Some((*rt_thread).runtime)
         }
     })
@@ -907,10 +897,11 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
 pub fn yieldyi() {
     critical_section(|| unsafe {
         let elapsed: u32 = elapsed_ticks_since_current_reload();
+        let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
-            rt_ktimer_entity(CURRENT_THREAD_CTX)
+            rt_ktimer_entity(current_thread)
         };
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
@@ -924,26 +915,27 @@ pub fn yieldyi() {
 pub fn msleepyi(msec: u32) {
     critical_section(|| unsafe {
         let elapsed = elapsed_ticks_since_current_reload();
+        let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
         let current_ktimer = if CURRENT_THREAD_IS_CFS {
             ptr::addr_of_mut!(CFS_KTIMER.entity)
         } else {
-            rt_ktimer_entity(CURRENT_THREAD_CTX)
+            rt_ktimer_entity(current_thread)
         };
 
         let _ = yield_ktimer(current_ktimer, elapsed, false);
 
         let wait_entity = if CURRENT_THREAD_IS_CFS {
-            cfs_wait_entity(CURRENT_THREAD_CTX)
+            cfs_wait_entity(current_thread)
         } else {
-            rt_wait_entity(CURRENT_THREAD_CTX)
+            rt_wait_entity(current_thread)
         };
         (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
         (*wait_entity).waitevt = 0;
 
         if CURRENT_THREAD_IS_CFS {
-            let _ = dequeue_runq_to_waitq(CURRENT_THREAD_CTX);
+            let _ = dequeue_runq_to_waitq(current_thread);
         } else {
-            let _ = dequeue_ktimerq_to_waitq(CURRENT_THREAD_CTX);
+            let _ = dequeue_ktimerq_to_waitq(current_thread);
         }
 
         request_context_switch();
@@ -991,6 +983,10 @@ mod tests {
         loop {
             core::hint::spin_loop();
         }
+    }
+
+    unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
+        unsafe { ThreadHandle::from_thread_ctx(thread) }
     }
 
     #[test]
@@ -1227,8 +1223,12 @@ mod tests {
         assert_eq!(cfs.sched_info().priority, 3);
 
         unsafe {
-            let entity = cfs_sched_entity(&mut cfs.thread);
-            assert!(ptr::eq(thread_from_cfs_sched_entity(entity), &cfs.thread));
+            let handle = thread_handle(&mut cfs.thread);
+            let entity = cfs_sched_entity(handle);
+            assert!(ptr::eq(
+                thread_handle_from_cfs_sched_entity(entity).as_ptr(),
+                &cfs.thread
+            ));
         }
     }
 
@@ -1252,12 +1252,14 @@ mod tests {
         let mut rt = rt_thread("rt");
 
         unsafe {
+            let cfs_handle = thread_handle(&mut cfs.thread);
+            let rt_handle = thread_handle(&mut rt.thread);
             assert!(ptr::eq(
-                thread_from_wait_entity(cfs_wait_entity(&mut cfs.thread)),
+                thread_handle_from_wait_entity(cfs_wait_entity(cfs_handle)).as_ptr(),
                 &cfs.thread
             ));
             assert!(ptr::eq(
-                thread_from_wait_entity(rt_wait_entity(&mut rt.thread)),
+                thread_handle_from_wait_entity(rt_wait_entity(rt_handle)).as_ptr(),
                 &rt.thread
             ));
         }
@@ -1312,9 +1314,10 @@ mod tests {
             CURRENT_THREAD_CTX = &mut rt.thread;
             CURRENT_THREAD_IS_CFS = false;
 
-            set_rt_ktimer_entity(&mut rt.thread, &mut ktimer);
-            assert!(ptr::eq(rt_ktimer_entity(&mut rt.thread), &ktimer));
-            assert!(ptr::eq(rt_thread_from_thread_ctx(&mut rt.thread), &rt));
+            let handle = thread_handle(&mut rt.thread);
+            set_rt_ktimer_entity(handle, &mut ktimer);
+            assert!(ptr::eq(rt_ktimer_entity(handle), &ktimer));
+            assert!(ptr::eq(rt_thread_from_handle(handle), &rt));
         }
 
         assert!(ptr::eq(rt.ktimer_entity().unwrap().as_ptr(), &ktimer));

@@ -11,8 +11,8 @@ use crate::ktimer::{
 };
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_thread_ctx,
-    thread_from_cfs_sched_entity,
+    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
+    thread_handle_from_cfs_sched_entity,
 };
 
 #[unsafe(no_mangle)]
@@ -62,14 +62,13 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
 /// this after `init_cfs`, before starting the scheduler, and while scheduler
 /// state is not being concurrently modified.
 pub unsafe fn register_idle_thread(thread: ThreadHandle) {
-    let thread = thread.as_ptr();
+    let thread_ptr = thread.as_ptr();
 
     crate::critical_section(|| unsafe {
-        assert!(!thread.is_null(), "idle thread must be non-null");
-        assert!((*thread).is_cfs, "idle thread must be a CFS thread");
+        assert!((*thread_ptr).is_cfs, "idle thread must be a CFS thread");
 
         dequeue_thread(thread);
-        IDLE_THREAD_CTX = thread;
+        IDLE_THREAD_CTX = thread_ptr;
     });
 }
 
@@ -83,28 +82,27 @@ where
 {
     crate::critical_section(|| unsafe {
         if !IDLE_THREAD_CTX.is_null() {
-            f(&*cfs_thread_from_thread_ctx(IDLE_THREAD_CTX));
+            let idle = ThreadHandle::from_thread_ctx(IDLE_THREAD_CTX);
+            f(&*cfs_thread_from_handle(idle));
         }
     });
 }
 
-unsafe fn switch_to_cfs_thread(next_thread: *mut ThreadCtx) {
+unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
     unsafe {
-        if next_thread.is_null() {
-            return;
-        }
+        let next_thread_ptr = next_thread.as_ptr();
 
-        crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
+        crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread_ptr);
 
         if !CURRENT_THREAD_CTX.is_null()
-            && CURRENT_THREAD_CTX != next_thread
+            && CURRENT_THREAD_CTX != next_thread_ptr
             && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
         {
             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
         }
 
-        (*next_thread).set_state(ThreadState::Running);
-        CURRENT_THREAD_CTX = next_thread;
+        (*next_thread_ptr).set_state(ThreadState::Running);
+        CURRENT_THREAD_CTX = next_thread_ptr;
         CURRENT_THREAD_IS_CFS = true;
     }
 }
@@ -116,7 +114,7 @@ unsafe fn switch_to_idle_thread() {
             return;
         }
 
-        switch_to_cfs_thread(idle);
+        switch_to_cfs_thread(ThreadHandle::from_thread_ctx(idle));
     }
 }
 
@@ -131,7 +129,8 @@ unsafe fn requeue_current_cfs_thread_before_idle() {
             return;
         }
 
-        let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
+        let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+        let current_entity = cfs_sched_entity(current);
         debug_assert!(
             !(*CFS_RUN_QUEUE.get()).contains(current_entity.cast_const()),
             "running CFS thread is already queued"
@@ -182,7 +181,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             && (*CURRENT_THREAD_CTX).state == ThreadState::Running
             && !is_idle_thread(CURRENT_THREAD_CTX)
         {
-            let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
+            let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+            let current_entity = cfs_sched_entity(current);
             let sched_tick_added = u64::from(elapsed);
             let priority_sum = *CFS_RUN_QUEUE.priority_sum();
             if priority_sum != 0 {
@@ -196,7 +196,9 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             if !(*next_ktimer).is_active() {
                 switch_to_idle_thread_with_current_requeued();
             } else if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
-                let next_thread = thread_from_cfs_sched_entity(next_entity as *mut SchedEntity);
+                let next_thread =
+                    thread_handle_from_cfs_sched_entity(next_entity as *mut SchedEntity);
+                let next_thread_ptr = next_thread.as_ptr();
 
                 if CURRENT_THREAD_IS_CFS {
                     if (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
@@ -204,17 +206,21 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
                     {
                         switch_to_cfs_thread(next_thread);
                     } else {
-                        let current_entity = cfs_sched_entity(CURRENT_THREAD_CTX);
+                        let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+                        let current_entity = cfs_sched_entity(current);
                         debug_assert!(
-                            CURRENT_THREAD_CTX != next_thread,
+                            CURRENT_THREAD_CTX != next_thread_ptr,
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
                         if (*current_entity).vruntime > next_entity.vruntime {
-                            crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
+                            crate::trace::record_context_switch(
+                                CURRENT_THREAD_CTX,
+                                next_thread_ptr,
+                            );
                             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
-                            (*next_thread).set_state(ThreadState::Running);
-                            CURRENT_THREAD_CTX = next_thread;
+                            (*next_thread_ptr).set_state(ThreadState::Running);
+                            CURRENT_THREAD_CTX = next_thread_ptr;
                             CURRENT_THREAD_IS_CFS = true;
                         } else {
                             (*CFS_RUN_QUEUE.get()).insert(next_entity as *mut SchedEntity);
@@ -235,16 +241,18 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             if next_thread.is_null() {
                 return;
             }
+            let next_thread_handle = ThreadHandle::from_thread_ctx(next_thread);
 
             if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
                 (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                 if CURRENT_THREAD_IS_CFS && !is_idle_thread(CURRENT_THREAD_CTX) {
-                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(CURRENT_THREAD_CTX));
+                    let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+                    (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(current));
                 }
             }
             crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
-            (*next_thread).set_state(ThreadState::Running);
-            CURRENT_THREAD_CTX = next_thread;
+            (*next_thread_handle.as_ptr()).set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = next_thread_handle.as_ptr();
             CURRENT_THREAD_IS_CFS = false;
         }
     }
@@ -338,7 +346,7 @@ mod tests {
 
     unsafe fn queue_cfs_thread(thread: *mut ThreadCtx) {
         unsafe {
-            let entity = cfs_sched_entity(thread);
+            let entity = cfs_sched_entity(ThreadHandle::from_thread_ctx(thread));
             (*entity).reset_links();
             (*CFS_RUN_QUEUE.get()).insert(entity);
             *CFS_RUN_QUEUE.priority_sum() += (*entity).priority;
