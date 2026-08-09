@@ -12,7 +12,7 @@ use crate::thread::{
     thread_ref_from_handle,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WaitQueueError {
     NotFound,
 }
@@ -227,6 +227,7 @@ mod tests {
                 is_cfs: true,
             },
             wait_entity: WaitEntity::new(),
+            sync_entity: crate::sync::SyncEntity::new(),
             sched_entity: SchedEntity::new(1),
         };
         thread.wait_entity.wake_at = wake_at;
