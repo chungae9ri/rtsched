@@ -16,7 +16,7 @@ use crate::ktimer::{
     CFS_KTIMER, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
     enqueue_ktimerq_from_waitq, program_wait_ktimer, yield_ktimer,
 };
-use crate::list::{List, ListLink, ListNode};
+use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::thread::{
@@ -29,49 +29,74 @@ const WAIT_EVENT_COUNTING_SEMAPHORE: u32 = 0x7365_6d63;
 const WAIT_EVENT_MUTEX: u32 = 0x6d75_7465;
 const WAIT_FOREVER_TICKS: u64 = u64::MAX;
 
-type WaitList = List<SyncEntity>;
+type WaitTree = RBTree<SyncEntity>;
 
+#[repr(C)]
 pub(crate) struct SyncEntity {
-    list_node: ListLink,
+    deadline_at: u64,
+    rb_node: RbNode,
 }
 
 impl SyncEntity {
     pub(crate) const fn new() -> Self {
         Self {
-            list_node: ListLink::new(),
+            deadline_at: 0,
+            rb_node: RbNode::new(),
         }
+    }
+
+    fn set_deadline_at(&mut self, deadline_at: u64) {
+        self.deadline_at = deadline_at;
+    }
+
+    #[allow(dead_code)]
+    fn deadline_at(&self) -> u64 {
+        self.deadline_at
+    }
+
+    fn reset_links(&mut self) {
+        self.rb_node.reset_links();
     }
 }
 
-unsafe impl ListNode for SyncEntity {
-    fn node(entity: *mut Self) -> *mut ListLink {
+unsafe impl RBTreeNode for SyncEntity {
+    fn node(entity: *mut Self) -> *mut RbNode {
         if entity.is_null() {
             ptr::null_mut()
         } else {
-            unsafe { ptr::addr_of_mut!((*entity).list_node) }
+            unsafe { ptr::addr_of_mut!((*entity).rb_node) }
         }
     }
 
-    fn entity_of(node: *mut ListLink) -> *mut Self {
+    fn entity_of(node: *mut RbNode) -> *mut Self {
         if node.is_null() {
             ptr::null_mut()
         } else {
             unsafe {
                 (node as *mut u8)
-                    .sub(offset_of!(SyncEntity, list_node))
+                    .sub(offset_of!(SyncEntity, rb_node))
                     .cast::<SyncEntity>()
             }
         }
     }
 
-    fn entity_of_const(node: *const ListLink) -> *const Self {
+    fn entity_of_const(node: *const RbNode) -> *const Self {
         if node.is_null() {
             ptr::null()
         } else {
             unsafe {
                 (node as *const u8)
-                    .sub(offset_of!(SyncEntity, list_node))
+                    .sub(offset_of!(SyncEntity, rb_node))
                     .cast::<SyncEntity>()
+            }
+        }
+    }
+
+    unsafe fn cmp(a: *const Self, b: *const Self) -> core::cmp::Ordering {
+        unsafe {
+            match (*a).deadline_at.cmp(&(*b).deadline_at) {
+                core::cmp::Ordering::Equal => (a as usize).cmp(&(b as usize)),
+                other => other,
             }
         }
     }
@@ -80,7 +105,7 @@ unsafe impl ListNode for SyncEntity {
 trait SyncWaitObject {
     const WAIT_EVENT: u32;
 
-    fn waiters_mut(&mut self) -> &mut WaitList;
+    fn waiters_mut(&mut self) -> &mut WaitTree;
 }
 
 /// Error returned by semaphore operations.
@@ -104,14 +129,14 @@ impl From<WaitQueueError> for SemaphoreError {
 
 struct BinarySemaphoreState {
     available: AtomicUsize,
-    waiters: WaitList,
+    waiters: WaitTree,
 }
 
 impl BinarySemaphoreState {
     const fn new(available: bool) -> Self {
         Self {
             available: AtomicUsize::new(available as usize),
-            waiters: WaitList::new(),
+            waiters: WaitTree::new(),
         }
     }
 }
@@ -119,7 +144,7 @@ impl BinarySemaphoreState {
 impl SyncWaitObject for BinarySemaphoreState {
     const WAIT_EVENT: u32 = WAIT_EVENT_BINARY_SEMAPHORE;
 
-    fn waiters_mut(&mut self) -> &mut WaitList {
+    fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
     }
 }
@@ -128,8 +153,8 @@ impl SyncWaitObject for BinarySemaphoreState {
 ///
 /// The semaphore stores a single token. `try_take` consumes that token when it
 /// is available. `take` blocks the current scheduler thread when the token is
-/// unavailable, and `give` either wakes the oldest blocked waiter or restores
-/// the token for a future taker.
+/// unavailable, and `give` either wakes the blocked waiter with the earliest
+/// scheduler deadline or restores the token for a future taker.
 pub struct BinarySemaphore {
     state: UnsafeCell<BinarySemaphoreState>,
 }
@@ -196,9 +221,10 @@ impl BinarySemaphore {
 
     /// Give the semaphore.
     ///
-    /// If one or more threads are blocked in `take`, the oldest waiter is made
-    /// ready and receives the token directly. Otherwise this restores the token
-    /// for a future taker, unless the semaphore is already full.
+    /// If one or more threads are blocked in `take`, the earliest-deadline
+    /// waiter is made ready and receives the token directly. Otherwise this
+    /// restores the token for a future taker, unless the semaphore is already
+    /// full.
     pub fn give(&self) -> Result<(), SemaphoreError> {
         critical_section(|| unsafe {
             let state = &mut *self.state.get();
@@ -221,7 +247,7 @@ impl BinarySemaphore {
 struct CountingSemaphoreState {
     count: AtomicUsize,
     max_count: AtomicUsize,
-    waiters: WaitList,
+    waiters: WaitTree,
 }
 
 impl CountingSemaphoreState {
@@ -229,7 +255,7 @@ impl CountingSemaphoreState {
         Self {
             count: AtomicUsize::new(initial_count as usize),
             max_count: AtomicUsize::new(max_count as usize),
-            waiters: WaitList::new(),
+            waiters: WaitTree::new(),
         }
     }
 }
@@ -237,7 +263,7 @@ impl CountingSemaphoreState {
 impl SyncWaitObject for CountingSemaphoreState {
     const WAIT_EVENT: u32 = WAIT_EVENT_COUNTING_SEMAPHORE;
 
-    fn waiters_mut(&mut self) -> &mut WaitList {
+    fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
     }
 }
@@ -246,8 +272,8 @@ impl SyncWaitObject for CountingSemaphoreState {
 ///
 /// The semaphore stores up to `max_count` tokens. `try_take` consumes one token
 /// when available. `take` blocks the current scheduler thread when no tokens
-/// are available, and `give` either wakes the oldest blocked waiter or stores
-/// one token for a future taker.
+/// are available, and `give` either wakes the blocked waiter with the earliest
+/// scheduler deadline or stores one token for a future taker.
 pub struct CountingSemaphore {
     state: UnsafeCell<CountingSemaphoreState>,
 }
@@ -328,9 +354,9 @@ impl CountingSemaphore {
 
     /// Give one token.
     ///
-    /// If one or more threads are blocked in `take`, the oldest waiter is made
-    /// ready and receives the token directly. Otherwise the token is stored
-    /// unless the semaphore is already full.
+    /// If one or more threads are blocked in `take`, the earliest-deadline
+    /// waiter is made ready and receives the token directly. Otherwise the
+    /// token is stored unless the semaphore is already full.
     pub fn give(&self) -> Result<(), SemaphoreError> {
         critical_section(|| unsafe {
             let state = &mut *self.state.get();
@@ -371,14 +397,14 @@ impl From<WaitQueueError> for MutexError {
 
 struct MutexState {
     owner: AtomicUsize,
-    waiters: WaitList,
+    waiters: WaitTree,
 }
 
 impl MutexState {
     const fn new() -> Self {
         Self {
             owner: AtomicUsize::new(0),
-            waiters: WaitList::new(),
+            waiters: WaitTree::new(),
         }
     }
 }
@@ -386,7 +412,7 @@ impl MutexState {
 impl SyncWaitObject for MutexState {
     const WAIT_EVENT: u32 = WAIT_EVENT_MUTEX;
 
-    fn waiters_mut(&mut self) -> &mut WaitList {
+    fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
     }
 }
@@ -395,7 +421,8 @@ impl SyncWaitObject for MutexState {
 ///
 /// The mutex is owned by a scheduler thread while a [`MutexGuard`] exists. If
 /// another thread calls `lock`, it is moved to the wait queue and the guard
-/// returned to it once the current owner drops its guard.
+/// returned to it once the current owner drops its guard and it has the
+/// earliest scheduler deadline among the mutex waiters.
 pub struct Mutex<T> {
     state: UnsafeCell<MutexState>,
     data: UnsafeCell<T>,
@@ -496,8 +523,8 @@ impl<T> Mutex<T> {
 
 /// RAII guard returned by [`Mutex::lock`] and [`Mutex::try_lock`].
 ///
-/// Dropping the guard unlocks the mutex and wakes the oldest waiting thread, if
-/// one exists.
+/// Dropping the guard unlocks the mutex and wakes the earliest-deadline waiting
+/// thread, if one exists.
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
     _not_send: PhantomData<*mut ()>,
@@ -577,7 +604,7 @@ unsafe fn current_thread_handle() -> Option<ThreadHandle> {
 unsafe fn block_current_thread(
     thread: ThreadHandle,
     wait_event: u32,
-) -> Result<(), WaitQueueError> {
+) -> Result<u64, WaitQueueError> {
     unsafe {
         let current_thread_ctx = CURRENT_THREAD_CTX;
 
@@ -594,6 +621,12 @@ unsafe fn block_current_thread(
             rt_ktimer_entity(thread)
         };
 
+        let deadline_at = if current_ktimer.is_null() {
+            WAIT_FOREVER_TICKS
+        } else {
+            (*current_ktimer).deadline_at()
+        };
+
         let _ = yield_ktimer(current_ktimer, elapsed, false);
 
         let wait_entity = wait_entity(thread);
@@ -606,7 +639,7 @@ unsafe fn block_current_thread(
             dequeue_ktimerq_to_waitq(thread)?;
         }
 
-        Ok(())
+        Ok(deadline_at)
     }
 }
 
@@ -615,17 +648,20 @@ unsafe fn block_current_thread_on<T: SyncWaitObject>(
     thread: ThreadHandle,
 ) -> Result<(), WaitQueueError> {
     unsafe {
-        block_current_thread(thread, T::WAIT_EVENT)?;
-        object.waiters_mut().push_back(sync_entity(thread));
+        let deadline_at = block_current_thread(thread, T::WAIT_EVENT)?;
+        let entity = sync_entity(thread);
+        (*entity).set_deadline_at(deadline_at);
+        (*entity).reset_links();
+        object.waiters_mut().insert(entity);
         request_context_switch();
 
         Ok(())
     }
 }
 
-unsafe fn pop_waiting_thread(waiters: &mut WaitList) -> Option<ThreadHandle> {
+unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
     unsafe {
-        while let Some(sync_entity) = waiters.pop_front() {
+        while let Some(sync_entity) = waiters.pop_first() {
             let thread = thread_handle_from_sync_entity(sync_entity as *mut SyncEntity);
             if (*thread.as_ptr()).state == ThreadState::Waiting {
                 return Some(thread);
@@ -699,6 +735,63 @@ mod tests {
             CURRENT_THREAD_IS_CFS = true;
 
             handle
+        }
+    }
+
+    unsafe fn mark_waiting_with_sync_deadline(
+        thread: &mut CfsThread,
+        deadline_at: u64,
+    ) -> ThreadHandle {
+        unsafe {
+            let handle = ThreadHandle::from_thread_ctx(&mut thread.thread);
+            thread.thread.set_state(ThreadState::Waiting);
+            (*sync_entity(handle)).set_deadline_at(deadline_at);
+            handle
+        }
+    }
+
+    #[test]
+    fn sync_waiters_pop_by_earliest_deadline_not_insertion_order() {
+        let mut waiters = WaitTree::new();
+        let mut later = cfs_thread("later", 3);
+        let mut earlier = cfs_thread("earlier", 3);
+
+        unsafe {
+            let later_handle = mark_waiting_with_sync_deadline(&mut later, 40);
+            let earlier_handle = mark_waiting_with_sync_deadline(&mut earlier, 10);
+
+            waiters.insert(sync_entity(later_handle));
+            waiters.insert(sync_entity(earlier_handle));
+
+            assert_eq!(
+                pop_waiting_thread(&mut waiters).map(|thread| thread.as_ptr()),
+                Some(earlier_handle.as_ptr())
+            );
+            assert_eq!(
+                pop_waiting_thread(&mut waiters).map(|thread| thread.as_ptr()),
+                Some(later_handle.as_ptr())
+            );
+            assert!(pop_waiting_thread(&mut waiters).is_none());
+        }
+    }
+
+    #[test]
+    fn blocking_sync_take_copies_current_scheduler_deadline() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let semaphore = BinarySemaphore::empty();
+        let mut thread = cfs_thread("waiter", 3);
+
+        unsafe {
+            reset_scheduler_state();
+            let handle = make_running_cfs(&mut thread);
+
+            assert_eq!(semaphore.take(), Ok(()));
+
+            assert_eq!((*sync_entity(handle)).deadline_at(), 25);
+
+            *WAIT_QUEUE.get() = RBTree::new();
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
         }
     }
 

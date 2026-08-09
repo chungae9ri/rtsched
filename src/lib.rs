@@ -58,7 +58,6 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
 
 mod clock;
 mod ktimer;
-mod list;
 #[doc(hidden)]
 pub mod print;
 mod rbtree;
