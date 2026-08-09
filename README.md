@@ -320,6 +320,22 @@ CFS sleeper threads. `fast_sleeper` increments `FAST_WAKEUPS` and sleeps for
 advances the timer queue and wakes each thread through the wait queue when its
 sleep deadline expires.
 
+`sync_binary_semaphore.rs` demonstrates a one-token handoff with three
+contender threads: two `CfsThread`s and one `RtThread`. Each contender takes the
+binary semaphore, spins briefly while holding it, and gives it back. The
+`RtThread` calls `yieldyi()` at the end of each iteration.
+
+`sync_counting_semaphore.rs` demonstrates bounded token storage and waiter
+wakeup. A producer attempts to add three tokens every 120 ms with
+`CountingSemaphore::give()`, while fast and slow consumers block in `take()`.
+The token and overflow counters show whether tokens are handed directly to
+waiters or stored up to the configured maximum.
+
+`sync_mutex.rs` demonstrates mutex ownership transfer between two CFS threads.
+Both threads update the same `Mutex<u32>` protected counter. The owner thread
+sleeps briefly while holding the guard, causing the contender to block until
+the guard drops and wakes the next waiter.
+
 Compile-check every embedded example with:
 
 ```sh
@@ -346,6 +362,6 @@ probe-rs download \
   target/thumbv8m.main-none-eabihf/debug/examples/minimal_cfs
 ```
 
-Replace `minimal_cfs` with `minimal_rt`, `mixed_rt_cfs`, or `sleep_wake` to run
-the other examples.
-
+Replace `minimal_cfs` with `minimal_rt`, `mixed_rt_cfs`, `sleep_wake`,
+`sync_binary_semaphore`, `sync_counting_semaphore`, or `sync_mutex` to run the
+other examples.
