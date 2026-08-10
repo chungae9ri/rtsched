@@ -22,7 +22,7 @@ use crate::ktimer::{
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
-use crate::sync::SyncEntity;
+use crate::sync::{SyncEntity, SyncType};
 use crate::waitq::WaitEntity;
 
 /// Global counter for assigning unique thread IDs. Accessed only
@@ -301,8 +301,10 @@ impl CfsThread {
         }
     }
 
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
+    /// Return this thread's remaining wait ticks and synchronization wait type.
+    ///
+    /// Timer sleeps return `None` for the wait type.
+    pub fn wait_info(&self) -> (u32, Option<SyncType>) {
         wait_info_from_entity(&self.wait_entity)
     }
 }
@@ -350,8 +352,10 @@ impl RtThread {
         self.runtime
     }
 
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
+    /// Return this thread's remaining wait ticks and synchronization wait type.
+    ///
+    /// Timer sleeps return `None` for the wait type.
+    pub fn wait_info(&self) -> (u32, Option<SyncType>) {
         wait_info_from_entity(&self.wait_entity)
     }
 }
@@ -371,7 +375,7 @@ impl ThreadRef<'_> {
     }
 }
 
-fn wait_info_from_entity(entity: &WaitEntity) -> (u32, u32) {
+fn wait_info_from_entity(entity: &WaitEntity) -> (u32, Option<SyncType>) {
     (entity.remaining_at(ktimer_now_ticks()), entity.waitevt)
 }
 
@@ -980,7 +984,7 @@ pub fn msleepyi(msec: u32) {
             rt_wait_entity(current_thread)
         };
         (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
-        (*wait_entity).waitevt = 0;
+        (*wait_entity).waitevt = None;
 
         if CURRENT_THREAD_IS_CFS {
             let _ = dequeue_runq_to_waitq(current_thread);
@@ -1290,12 +1294,12 @@ mod tests {
         let mut rt = rt_thread("rt");
 
         cfs.wait_entity.set_wake_after(0, 11);
-        cfs.wait_entity.waitevt = 7;
+        cfs.wait_entity.waitevt = Some(SyncType::BinarySemaphore);
         rt.wait_entity.set_wake_after(0, 13);
-        rt.wait_entity.waitevt = 9;
+        rt.wait_entity.waitevt = Some(SyncType::Mutex);
 
-        assert_eq!(cfs.wait_info(), (11, 7));
-        assert_eq!(rt.wait_info(), (13, 9));
+        assert_eq!(cfs.wait_info(), (11, Some(SyncType::BinarySemaphore)));
+        assert_eq!(rt.wait_info(), (13, Some(SyncType::Mutex)));
     }
 
     #[test]

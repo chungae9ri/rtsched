@@ -24,9 +24,47 @@ use crate::thread::{
 };
 use crate::waitq::{WaitQueueError, remove_wait_thread, wait_entity};
 
-const WAIT_EVENT_BINARY_SEMAPHORE: u32 = 0x7365_6d62;
-const WAIT_EVENT_COUNTING_SEMAPHORE: u32 = 0x7365_6d63;
-const WAIT_EVENT_MUTEX: u32 = 0x6d75_7465;
+/// Synchronization primitive type encoded in a waiting thread's event tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum SyncType {
+    BinarySemaphore = u32::from_be_bytes(*b"semb"),
+    CountingSemaphore = u32::from_be_bytes(*b"semc"),
+    Mutex = u32::from_be_bytes(*b"mute"),
+}
+
+impl PartialOrd for SyncType {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SyncType {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.wait_event().cmp(&other.wait_event())
+    }
+}
+
+impl SyncType {
+    /// Return the wait-queue event tag for this synchronization type.
+    pub const fn wait_event(self) -> u32 {
+        self as u32
+    }
+
+    /// Decode a wait-queue event tag into a synchronization type.
+    pub const fn from_wait_event(wait_event: u32) -> Option<Self> {
+        if wait_event == Self::BinarySemaphore.wait_event() {
+            Some(Self::BinarySemaphore)
+        } else if wait_event == Self::CountingSemaphore.wait_event() {
+            Some(Self::CountingSemaphore)
+        } else if wait_event == Self::Mutex.wait_event() {
+            Some(Self::Mutex)
+        } else {
+            None
+        }
+    }
+}
+
 const WAIT_FOREVER_TICKS: u64 = u64::MAX;
 
 type WaitTree = RBTree<SyncEntity>;
@@ -103,7 +141,7 @@ unsafe impl RBTreeNode for SyncEntity {
 }
 
 trait SyncWaitObject {
-    const WAIT_EVENT: u32;
+    const SYNC_TYPE: SyncType;
 
     fn waiters_mut(&mut self) -> &mut WaitTree;
 }
@@ -142,7 +180,7 @@ impl BinarySemaphoreState {
 }
 
 impl SyncWaitObject for BinarySemaphoreState {
-    const WAIT_EVENT: u32 = WAIT_EVENT_BINARY_SEMAPHORE;
+    const SYNC_TYPE: SyncType = SyncType::BinarySemaphore;
 
     fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
@@ -261,7 +299,7 @@ impl CountingSemaphoreState {
 }
 
 impl SyncWaitObject for CountingSemaphoreState {
-    const WAIT_EVENT: u32 = WAIT_EVENT_COUNTING_SEMAPHORE;
+    const SYNC_TYPE: SyncType = SyncType::CountingSemaphore;
 
     fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
@@ -410,7 +448,7 @@ impl MutexState {
 }
 
 impl SyncWaitObject for MutexState {
-    const WAIT_EVENT: u32 = WAIT_EVENT_MUTEX;
+    const SYNC_TYPE: SyncType = SyncType::Mutex;
 
     fn waiters_mut(&mut self) -> &mut WaitTree {
         &mut self.waiters
@@ -603,7 +641,7 @@ unsafe fn current_thread_handle() -> Option<ThreadHandle> {
 
 unsafe fn block_current_thread(
     thread: ThreadHandle,
-    wait_event: u32,
+    sync_type: SyncType,
 ) -> Result<u64, WaitQueueError> {
     unsafe {
         let current_thread_ctx = CURRENT_THREAD_CTX;
@@ -631,7 +669,7 @@ unsafe fn block_current_thread(
 
         let wait_entity = wait_entity(thread);
         (*wait_entity).wake_at = WAIT_FOREVER_TICKS;
-        (*wait_entity).waitevt = wait_event;
+        (*wait_entity).waitevt = Some(sync_type);
 
         if CURRENT_THREAD_IS_CFS {
             dequeue_runq_to_waitq(thread)?;
@@ -648,7 +686,7 @@ unsafe fn block_current_thread_on<T: SyncWaitObject>(
     thread: ThreadHandle,
 ) -> Result<(), WaitQueueError> {
     unsafe {
-        let deadline_at = block_current_thread(thread, T::WAIT_EVENT)?;
+        let deadline_at = block_current_thread(thread, T::SYNC_TYPE)?;
         let entity = sync_entity(thread);
         (*entity).set_deadline_at(deadline_at);
         (*entity).reset_links();
@@ -751,6 +789,33 @@ mod tests {
     }
 
     #[test]
+    fn sync_type_wait_events_decode_named_tags() {
+        assert_eq!(
+            SyncType::BinarySemaphore.wait_event(),
+            u32::from_be_bytes(*b"semb")
+        );
+        assert_eq!(
+            SyncType::CountingSemaphore.wait_event(),
+            u32::from_be_bytes(*b"semc")
+        );
+        assert_eq!(SyncType::Mutex.wait_event(), u32::from_be_bytes(*b"mute"));
+
+        assert_eq!(
+            SyncType::from_wait_event(u32::from_be_bytes(*b"semb")),
+            Some(SyncType::BinarySemaphore)
+        );
+        assert_eq!(
+            SyncType::from_wait_event(u32::from_be_bytes(*b"semc")),
+            Some(SyncType::CountingSemaphore)
+        );
+        assert_eq!(
+            SyncType::from_wait_event(u32::from_be_bytes(*b"mute")),
+            Some(SyncType::Mutex)
+        );
+        assert_eq!(SyncType::from_wait_event(0), None);
+    }
+
+    #[test]
     fn sync_waiters_pop_by_earliest_deadline_not_insertion_order() {
         let mut waiters = WaitTree::new();
         let mut later = cfs_thread("later", 3);
@@ -823,6 +888,10 @@ mod tests {
             assert_eq!(thread.thread.state, ThreadState::Waiting);
             assert!(!semaphore.is_available());
             assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+            assert_eq!(
+                (*wait_entity(handle)).waitevt,
+                Some(SyncType::BinarySemaphore)
+            );
 
             assert_eq!(semaphore.give(), Ok(()));
 
@@ -885,6 +954,10 @@ mod tests {
             assert_eq!(thread.thread.state, ThreadState::Waiting);
             assert_eq!(semaphore.count(), 0);
             assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+            assert_eq!(
+                (*wait_entity(handle)).waitevt,
+                Some(SyncType::CountingSemaphore)
+            );
 
             assert_eq!(semaphore.give(), Ok(()));
 
@@ -1011,6 +1084,7 @@ mod tests {
 
             assert_eq!(waiter.thread.state, ThreadState::Waiting);
             assert!((*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
+            assert_eq!((*wait_entity(waiter_handle)).waitevt, Some(SyncType::Mutex));
 
             core::mem::forget(waiter_guard);
 

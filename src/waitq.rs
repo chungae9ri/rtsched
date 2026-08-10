@@ -7,6 +7,7 @@ use core::ptr;
 
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
+use crate::sync::SyncType;
 use crate::thread::{
     ThreadHandle, ThreadRef, cfs_wait_entity, rt_wait_entity, thread_handle_from_wait_entity,
     thread_ref_from_handle,
@@ -39,7 +40,7 @@ pub(crate) static WAIT_QUEUE: WaitQueue = WaitQueue::new();
 
 pub struct WaitEntity {
     pub wake_at: u64,
-    pub waitevt: u32,
+    pub waitevt: Option<SyncType>,
     rb_node: RbNode,
 }
 
@@ -47,7 +48,7 @@ impl WaitEntity {
     pub const fn new() -> Self {
         Self {
             wake_at: 0,
-            waitevt: 0,
+            waitevt: None,
             rb_node: RbNode::new(),
         }
     }
@@ -216,7 +217,7 @@ mod tests {
         }
     }
 
-    fn cfs_thread(name: &'static str, wake_at: u64, waitevt: u32) -> CfsThread {
+    fn cfs_thread(name: &'static str, wake_at: u64, waitevt: Option<SyncType>) -> CfsThread {
         let mut thread = CfsThread {
             thread: ThreadCtx {
                 sp: 0,
@@ -274,9 +275,9 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
 
         reset_wait_queue();
-        let mut first = cfs_thread("first", 10, 2);
-        let mut second = cfs_thread("second", 5, 9);
-        let mut third = cfs_thread("third", 10, 1);
+        let mut first = cfs_thread("first", 10, Some(SyncType::BinarySemaphore));
+        let mut second = cfs_thread("second", 5, Some(SyncType::CountingSemaphore));
+        let mut third = cfs_thread("third", 10, Some(SyncType::Mutex));
 
         unsafe {
             insert_wait_thread(thread_handle(&mut first.thread));
@@ -305,9 +306,9 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
 
         reset_wait_queue();
-        let mut first = cfs_thread("first", 3, 0);
-        let mut second = cfs_thread("second", 12, 0);
-        let mut third = cfs_thread("third", 7, 0);
+        let mut first = cfs_thread("first", 3, None);
+        let mut second = cfs_thread("second", 12, None);
+        let mut third = cfs_thread("third", 7, None);
 
         unsafe {
             insert_wait_thread(thread_handle(&mut first.thread));
@@ -327,8 +328,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
 
         reset_wait_queue();
-        let mut expired = cfs_thread("expired", 0, 0);
-        let mut pending = cfs_thread("pending", 4, 0);
+        let mut expired = cfs_thread("expired", 0, None);
+        let mut pending = cfs_thread("pending", 4, None);
 
         unsafe {
             insert_wait_thread(thread_handle(&mut pending.thread));
@@ -349,8 +350,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap();
 
         reset_wait_queue();
-        let mut first = cfs_thread("first", 1, 0);
-        let mut second = cfs_thread("second", 2, 0);
+        let mut first = cfs_thread("first", 1, None);
+        let mut second = cfs_thread("second", 2, None);
 
         unsafe {
             insert_wait_thread(thread_handle(&mut first.thread));
