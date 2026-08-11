@@ -1127,6 +1127,7 @@ mod tests {
                 is_cfs: false,
             },
             wait_entity: WaitEntity::new(),
+            sync_entity: crate::sync::SyncEntity::new(),
             ktimer_entity: ptr::null_mut(),
             runtime: 0,
         }

@@ -412,6 +412,7 @@ mod tests {
                 is_cfs: true,
             },
             wait_entity: WaitEntity::new(),
+            sync_entity: crate::sync::SyncEntity::new(),
             sched_entity: SchedEntity::new(priority),
         };
         thread.sched_entity.vruntime = vruntime;

@@ -63,6 +63,7 @@ pub mod print;
 mod rbtree;
 mod runq;
 mod sched;
+mod sync;
 mod thread;
 mod trace;
 mod waitq;
@@ -95,6 +96,10 @@ pub use ktimer::{
 pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
 
 pub use sched::{handle_sched_tick, init_cfs, register_idle_thread, traverse_idle_thread_fn};
+
+pub use sync::{
+    BinarySemaphore, CountingSemaphore, Mutex, MutexError, MutexGuard, SemaphoreError, SyncType,
+};
 
 pub use trace::{
     TraceCounters, TraceEvent, TraceFn, TraceThread, clear_trace_fn, reset_trace_counters,

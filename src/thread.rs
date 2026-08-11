@@ -22,6 +22,7 @@ use crate::ktimer::{
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread};
 use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
+use crate::sync::{SyncEntity, SyncType};
 use crate::waitq::WaitEntity;
 
 /// Global counter for assigning unique thread IDs. Accessed only
@@ -270,6 +271,8 @@ pub struct CfsThread {
     pub(crate) thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
     pub(crate) wait_entity: WaitEntity,
+    /// Sync entity used for semaphore and mutex waiter ordering.
+    pub(crate) sync_entity: SyncEntity,
     /// Scheduler entity used for CFS run-queue ordering.
     pub(crate) sched_entity: SchedEntity,
 }
@@ -298,8 +301,10 @@ impl CfsThread {
         }
     }
 
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
+    /// Return this thread's remaining wait ticks and synchronization wait type.
+    ///
+    /// Timer sleeps return `None` for the wait type.
+    pub fn wait_info(&self) -> (u32, Option<SyncType>) {
         wait_info_from_entity(&self.wait_entity)
     }
 }
@@ -312,6 +317,8 @@ pub struct RtThread {
     pub(crate) thread: ThreadCtx,
     /// Wait entity used for wait-queue ordering.
     pub(crate) wait_entity: WaitEntity,
+    /// Sync entity used for semaphore and mutex waiter ordering.
+    pub(crate) sync_entity: SyncEntity,
     /// KTimer entity used for KTimerQueue ordering.
     pub(crate) ktimer_entity: *mut KTimerEntity,
     /// Elapsed tick counter for the RT thread's current period/job window.
@@ -345,8 +352,10 @@ impl RtThread {
         self.runtime
     }
 
-    /// Return this thread's remaining wait ticks and wait event.
-    pub fn wait_info(&self) -> (u32, u32) {
+    /// Return this thread's remaining wait ticks and synchronization wait type.
+    ///
+    /// Timer sleeps return `None` for the wait type.
+    pub fn wait_info(&self) -> (u32, Option<SyncType>) {
         wait_info_from_entity(&self.wait_entity)
     }
 }
@@ -366,7 +375,7 @@ impl ThreadRef<'_> {
     }
 }
 
-fn wait_info_from_entity(entity: &WaitEntity) -> (u32, u32) {
+fn wait_info_from_entity(entity: &WaitEntity) -> (u32, Option<SyncType>) {
     (entity.remaining_at(ktimer_now_ticks()), entity.waitevt)
 }
 
@@ -411,6 +420,7 @@ impl ThreadControlBlock for CfsThread {
                 CfsThread {
                     thread: common,
                     wait_entity: WaitEntity::new(),
+                    sync_entity: SyncEntity::new(),
                     sched_entity: SchedEntity::new(priority),
                 },
             );
@@ -434,6 +444,7 @@ impl ThreadControlBlock for RtThread {
                 RtThread {
                     thread: common,
                     wait_entity: WaitEntity::new(),
+                    sync_entity: SyncEntity::new(),
                     ktimer_entity: ptr::null_mut(),
                     runtime: 0,
                 },
@@ -786,6 +797,34 @@ pub(crate) unsafe fn rt_wait_entity(thread: ThreadHandle) -> *mut WaitEntity {
     unsafe { ptr::addr_of_mut!((*rt_thread).wait_entity) }
 }
 
+pub(crate) unsafe fn cfs_sync_entity(thread: ThreadHandle) -> *mut SyncEntity {
+    let thread = thread.as_ptr();
+    let cfs_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, thread))
+        .cast::<CfsThread>();
+
+    unsafe { ptr::addr_of_mut!((*cfs_thread).sync_entity) }
+}
+
+pub(crate) unsafe fn rt_sync_entity(thread: ThreadHandle) -> *mut SyncEntity {
+    let thread = thread.as_ptr();
+    let rt_thread = (thread as *mut u8)
+        .wrapping_sub(offset_of!(RtThread, thread))
+        .cast::<RtThread>();
+
+    unsafe { ptr::addr_of_mut!((*rt_thread).sync_entity) }
+}
+
+pub(crate) unsafe fn sync_entity(thread: ThreadHandle) -> *mut SyncEntity {
+    unsafe {
+        if (*thread.as_ptr()).is_cfs {
+            cfs_sync_entity(thread)
+        } else {
+            rt_sync_entity(thread)
+        }
+    }
+}
+
 pub(crate) unsafe fn rt_ktimer_entity(thread: ThreadHandle) -> *mut KTimerEntity {
     let thread = thread.as_ptr();
     let rt_thread = (thread as *mut u8)
@@ -816,6 +855,21 @@ pub(crate) unsafe fn thread_handle_from_wait_entity(entity: *mut WaitEntity) -> 
 
     let thread = (entity as *mut u8)
         .wrapping_sub(offset_of!(CfsThread, wait_entity))
+        .cast::<CfsThread>();
+
+    unsafe { ThreadHandle::from_thread_ctx(ptr::addr_of_mut!((*thread).thread)) }
+}
+
+pub(crate) unsafe fn thread_handle_from_sync_entity(entity: *mut SyncEntity) -> ThreadHandle {
+    debug_assert!(!entity.is_null());
+
+    debug_assert_eq!(
+        offset_of!(CfsThread, sync_entity),
+        offset_of!(RtThread, sync_entity)
+    );
+
+    let thread = (entity as *mut u8)
+        .wrapping_sub(offset_of!(CfsThread, sync_entity))
         .cast::<CfsThread>();
 
     unsafe { ThreadHandle::from_thread_ctx(ptr::addr_of_mut!((*thread).thread)) }
@@ -930,7 +984,7 @@ pub fn msleepyi(msec: u32) {
             rt_wait_entity(current_thread)
         };
         (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
-        (*wait_entity).waitevt = 0;
+        (*wait_entity).waitevt = None;
 
         if CURRENT_THREAD_IS_CFS {
             let _ = dequeue_runq_to_waitq(current_thread);
@@ -959,6 +1013,7 @@ mod tests {
                 is_cfs: true,
             },
             wait_entity: WaitEntity::new(),
+            sync_entity: SyncEntity::new(),
             sched_entity: SchedEntity::new(priority),
         }
     }
@@ -974,6 +1029,7 @@ mod tests {
                 is_cfs: false,
             },
             wait_entity: WaitEntity::new(),
+            sync_entity: SyncEntity::new(),
             ktimer_entity: ptr::null_mut(),
             runtime: 0,
         }
@@ -1238,12 +1294,12 @@ mod tests {
         let mut rt = rt_thread("rt");
 
         cfs.wait_entity.set_wake_after(0, 11);
-        cfs.wait_entity.waitevt = 7;
+        cfs.wait_entity.waitevt = Some(SyncType::BinarySemaphore);
         rt.wait_entity.set_wake_after(0, 13);
-        rt.wait_entity.waitevt = 9;
+        rt.wait_entity.waitevt = Some(SyncType::Mutex);
 
-        assert_eq!(cfs.wait_info(), (11, 7));
-        assert_eq!(rt.wait_info(), (13, 9));
+        assert_eq!(cfs.wait_info(), (11, Some(SyncType::BinarySemaphore)));
+        assert_eq!(rt.wait_info(), (13, Some(SyncType::Mutex)));
     }
 
     #[test]
@@ -1260,6 +1316,25 @@ mod tests {
             ));
             assert!(ptr::eq(
                 thread_handle_from_wait_entity(rt_wait_entity(rt_handle)).as_ptr(),
+                &rt.thread
+            ));
+        }
+    }
+
+    #[test]
+    fn sync_entity_recovers_thread_context_for_both_thread_classes() {
+        let mut cfs = cfs_thread("cfs", 1);
+        let mut rt = rt_thread("rt");
+
+        unsafe {
+            let cfs_handle = thread_handle(&mut cfs.thread);
+            let rt_handle = thread_handle(&mut rt.thread);
+            assert!(ptr::eq(
+                thread_handle_from_sync_entity(sync_entity(cfs_handle)).as_ptr(),
+                &cfs.thread
+            ));
+            assert!(ptr::eq(
+                thread_handle_from_sync_entity(sync_entity(rt_handle)).as_ptr(),
                 &rt.thread
             ));
         }

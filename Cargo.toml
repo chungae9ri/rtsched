@@ -58,3 +58,24 @@ path = "examples/sleep_wake.rs"
 test = false
 bench = false
 required-features = ["embedded-examples"]
+
+[[example]]
+name = "sync_binary_semaphore"
+path = "examples/sync_binary_semaphore.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
+
+[[example]]
+name = "sync_counting_semaphore"
+path = "examples/sync_counting_semaphore.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
+
+[[example]]
+name = "sync_mutex"
+path = "examples/sync_mutex.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]
