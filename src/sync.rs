@@ -13,8 +13,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::arch::platform::request_context_switch;
 use crate::critical_section;
 use crate::ktimer::{
-    CFS_KTIMER, dequeue_ktimerq_to_waitq, elapsed_ticks_since_current_reload,
-    enqueue_ktimerq_from_waitq, program_wait_ktimer, yield_ktimer,
+    CFS_KTIMER, dequeue_ktimerq_to_waitq, earliest_queued_scheduler_deadline_at,
+    elapsed_ticks_since_current_reload, enqueue_ktimerq_from_waitq, program_wait_ktimer,
+    set_thread_scheduler_deadline_at, thread_scheduler_deadline_at, yield_ktimer,
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
@@ -436,6 +437,8 @@ impl From<WaitQueueError> for MutexError {
 struct MutexState {
     owner: AtomicUsize,
     waiters: WaitTree,
+    owner_original_deadline_at: u64,
+    owner_boosted: bool,
 }
 
 impl MutexState {
@@ -443,6 +446,8 @@ impl MutexState {
         Self {
             owner: AtomicUsize::new(0),
             waiters: WaitTree::new(),
+            owner_original_deadline_at: 0,
+            owner_boosted: false,
         }
     }
 }
@@ -522,8 +527,9 @@ impl<T> Mutex<T> {
                 Err(owner) if owner == current_owner => {
                     return Err(MutexError::WouldDeadlock);
                 }
-                Err(_) => {
-                    block_current_thread_on(state, current_thread)?;
+                Err(owner) => {
+                    let waiter_deadline_at = block_current_thread_on(state, current_thread)?;
+                    boost_owner_deadline(state, owner, current_thread, waiter_deadline_at);
                 }
             }
 
@@ -545,6 +551,8 @@ impl<T> Mutex<T> {
             if observed_owner != current_owner {
                 return Ok(());
             }
+
+            restore_owner_deadline(state, current_owner);
 
             if let Some(waiter) = pop_waiting_thread(&mut state.waiters) {
                 let _ = compare_exchange_word(&state.owner, current_owner, owner_token(waiter));
@@ -629,6 +637,62 @@ fn owner_token(thread: ThreadHandle) -> usize {
     token
 }
 
+unsafe fn thread_from_owner_token(token: usize) -> Option<ThreadHandle> {
+    if token == 0 {
+        None
+    } else {
+        Some(unsafe { ThreadHandle::from_thread_ctx(token as *mut _) })
+    }
+}
+
+unsafe fn boost_owner_deadline(
+    state: &mut MutexState,
+    owner: usize,
+    waiter: ThreadHandle,
+    waiter_deadline_at: u64,
+) {
+    let Some(owner) = (unsafe { thread_from_owner_token(owner) }) else {
+        return;
+    };
+
+    let boost_deadline_at = unsafe {
+        if (*owner.as_ptr()).is_cfs && (*waiter.as_ptr()).is_cfs {
+            return;
+        }
+
+        waiter_deadline_at.min(earliest_queued_scheduler_deadline_at())
+    };
+
+    let owner_deadline_at = unsafe { thread_scheduler_deadline_at(owner) };
+    if boost_deadline_at >= owner_deadline_at {
+        return;
+    }
+
+    if !state.owner_boosted {
+        state.owner_original_deadline_at = owner_deadline_at;
+        state.owner_boosted = true;
+    }
+
+    unsafe {
+        set_thread_scheduler_deadline_at(owner, boost_deadline_at);
+    }
+}
+
+unsafe fn restore_owner_deadline(state: &mut MutexState, owner: usize) {
+    if !state.owner_boosted {
+        return;
+    }
+
+    if let Some(owner) = unsafe { thread_from_owner_token(owner) } {
+        unsafe {
+            set_thread_scheduler_deadline_at(owner, state.owner_original_deadline_at);
+        }
+    }
+
+    state.owner_original_deadline_at = 0;
+    state.owner_boosted = false;
+}
+
 unsafe fn current_thread_handle() -> Option<ThreadHandle> {
     unsafe {
         if CURRENT_THREAD_CTX.is_null() {
@@ -684,7 +748,7 @@ unsafe fn block_current_thread(
 unsafe fn block_current_thread_on<T: SyncWaitObject>(
     object: &mut T,
     thread: ThreadHandle,
-) -> Result<(), WaitQueueError> {
+) -> Result<u64, WaitQueueError> {
     unsafe {
         let deadline_at = block_current_thread(thread, T::SYNC_TYPE)?;
         let entity = sync_entity(thread);
@@ -693,7 +757,7 @@ unsafe fn block_current_thread_on<T: SyncWaitObject>(
         object.waiters_mut().insert(entity);
         request_context_switch();
 
-        Ok(())
+        Ok(deadline_at)
     }
 }
 
@@ -729,11 +793,11 @@ unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueError> {
 mod tests {
     use super::*;
     use crate::TEST_LOCK;
-    use crate::ktimer::init_ktimer_queue;
+    use crate::ktimer::{RtKTimer, enqueue_ktimer, init_ktimer_queue, next_ktimer};
     use crate::rbtree::RBTree;
     use crate::runq::{CFS_RUN_QUEUE, SchedEntity, enqueue_thread};
     use crate::sched::{CURRENT_THREAD_IS_CFS, init_cfs};
-    use crate::thread::{CfsThread, ThreadCtx, cfs_sched_entity};
+    use crate::thread::{CfsThread, RtThread, ThreadCtx, cfs_sched_entity, rt_ktimer_entity};
     use crate::waitq::{WAIT_QUEUE, WaitEntity};
 
     fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
@@ -749,6 +813,23 @@ mod tests {
             wait_entity: WaitEntity::new(),
             sync_entity: SyncEntity::new(),
             sched_entity: SchedEntity::new(priority),
+        }
+    }
+
+    fn rt_thread(name: &'static str) -> RtThread {
+        RtThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 1,
+                name,
+                state: ThreadState::Ready,
+                is_cfs: false,
+            },
+            wait_entity: WaitEntity::new(),
+            sync_entity: SyncEntity::new(),
+            ktimer_entity: ptr::null_mut(),
+            runtime: 0,
         }
     }
 
@@ -771,6 +852,18 @@ mod tests {
             thread.thread.set_state(ThreadState::Running);
             CURRENT_THREAD_CTX = &mut thread.thread;
             CURRENT_THREAD_IS_CFS = true;
+
+            handle
+        }
+    }
+
+    unsafe fn make_running_rt(thread: &mut RtThread) -> ThreadHandle {
+        unsafe {
+            let handle = ThreadHandle::from_thread_ctx(&mut thread.thread);
+
+            thread.thread.set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = &mut thread.thread;
+            CURRENT_THREAD_IS_CFS = false;
 
             handle
         }
@@ -855,6 +948,162 @@ mod tests {
             assert_eq!((*sync_entity(handle)).deadline_at(), 25);
 
             *WAIT_QUEUE.get() = RBTree::new();
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    #[test]
+    fn mutex_lock_boosts_rt_owner_deadline_and_unlock_restores_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mutex = Mutex::new(7);
+        let mut owner = rt_thread("owner");
+        let mut owner_timer = RtKTimer::new(100, ptr::null_mut(), "owner");
+        let mut waiter = rt_thread("waiter");
+        let mut waiter_timer = RtKTimer::new(10, ptr::null_mut(), "waiter");
+
+        unsafe {
+            reset_scheduler_state();
+            owner_timer.init_rt_thread(&mut owner);
+            waiter_timer.init_rt_thread(&mut waiter);
+            enqueue_ktimer(owner_timer.entity_mut());
+            enqueue_ktimer(waiter_timer.entity_mut());
+            make_running_rt(&mut owner);
+        }
+
+        let owner_guard = mutex.lock().expect("owner should lock mutex");
+
+        let waiter_handle = unsafe {
+            owner.thread.set_state(ThreadState::Ready);
+            make_running_rt(&mut waiter)
+        };
+
+        let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+
+        unsafe {
+            assert_eq!(waiter.thread.state, ThreadState::Waiting);
+            assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 10);
+            assert_eq!(owner_timer.entity.deadline_at(), 10);
+            assert!(ptr::eq(next_ktimer(), owner_timer.entity_mut()));
+
+            core::mem::forget(waiter_guard);
+            owner.thread.set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = &mut owner.thread;
+            CURRENT_THREAD_IS_CFS = false;
+        }
+
+        drop(owner_guard);
+
+        unsafe {
+            assert_eq!(owner_timer.entity.deadline_at(), 100);
+            assert_eq!(waiter.thread.state, ThreadState::Ready);
+            assert!(ptr::eq(
+                rt_ktimer_entity(waiter_handle),
+                waiter_timer.entity_mut()
+            ));
+
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    #[test]
+    fn mutex_lock_boosts_rt_owner_to_earliest_scheduler_deadline_and_unlock_restores_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mutex = Mutex::new(7);
+        let mut owner = rt_thread("owner");
+        let mut owner_timer = RtKTimer::new(100, ptr::null_mut(), "owner");
+        let mut waiter = rt_thread("waiter");
+        let mut waiter_timer = RtKTimer::new(40, ptr::null_mut(), "waiter");
+
+        unsafe {
+            reset_scheduler_state();
+            owner_timer.init_rt_thread(&mut owner);
+            waiter_timer.init_rt_thread(&mut waiter);
+            enqueue_ktimer(owner_timer.entity_mut());
+            enqueue_ktimer(waiter_timer.entity_mut());
+            make_running_rt(&mut owner);
+        }
+
+        let owner_guard = mutex.lock().expect("owner should lock mutex");
+
+        let waiter_handle = unsafe {
+            owner.thread.set_state(ThreadState::Ready);
+            make_running_rt(&mut waiter)
+        };
+
+        let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+
+        unsafe {
+            assert_eq!(waiter.thread.state, ThreadState::Waiting);
+            assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 40);
+            assert_eq!(owner_timer.entity.deadline_at(), 25);
+
+            core::mem::forget(waiter_guard);
+            owner.thread.set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = &mut owner.thread;
+            CURRENT_THREAD_IS_CFS = false;
+        }
+
+        drop(owner_guard);
+
+        unsafe {
+            assert_eq!(owner_timer.entity.deadline_at(), 100);
+            assert_eq!(waiter.thread.state, ThreadState::Ready);
+
+            CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
+        }
+    }
+
+    #[test]
+    fn mutex_lock_boosts_cfs_owner_to_earliest_scheduler_deadline_and_unlock_restores_it() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mutex = Mutex::new(7);
+        let mut owner = cfs_thread("owner", 3);
+        let mut waiter = rt_thread("waiter");
+        let mut waiter_timer = RtKTimer::new(10, ptr::null_mut(), "waiter");
+        let mut earlier_rt = rt_thread("earlier_rt");
+        let mut earlier_rt_timer = RtKTimer::new(8, ptr::null_mut(), "earlier_rt");
+
+        unsafe {
+            reset_scheduler_state();
+            waiter_timer.init_rt_thread(&mut waiter);
+            earlier_rt_timer.init_rt_thread(&mut earlier_rt);
+            enqueue_ktimer(waiter_timer.entity_mut());
+            enqueue_ktimer(earlier_rt_timer.entity_mut());
+            make_running_cfs(&mut owner);
+        }
+
+        let owner_guard = mutex.lock().expect("owner should lock mutex");
+
+        unsafe {
+            owner.thread.set_state(ThreadState::Ready);
+            make_running_rt(&mut waiter);
+        }
+
+        let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+
+        unsafe {
+            assert_eq!(waiter.thread.state, ThreadState::Waiting);
+            let cfs = ptr::addr_of!(CFS_KTIMER);
+            let cfs_entity = ptr::addr_of!((*cfs).entity);
+            assert_eq!((*cfs_entity).deadline_at(), 8);
+
+            core::mem::forget(waiter_guard);
+            owner.thread.set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = &mut owner.thread;
+            CURRENT_THREAD_IS_CFS = true;
+        }
+
+        drop(owner_guard);
+
+        unsafe {
+            let cfs = ptr::addr_of!(CFS_KTIMER);
+            let cfs_entity = ptr::addr_of!((*cfs).entity);
+            assert_eq!((*cfs_entity).deadline_at(), 25);
+            assert_eq!(waiter.thread.state, ThreadState::Ready);
+
             CURRENT_THREAD_CTX = ptr::null_mut();
             CURRENT_THREAD_IS_CFS = false;
         }
