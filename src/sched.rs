@@ -385,6 +385,11 @@ mod tests {
             assert_eq!((*cfs).period_ticks(), 100);
             assert_eq!((*entity).deadline(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
+            assert_eq!((*cfs).timing(), crate::ktimer::RtTiming::new(100, 25, 25));
+            assert_eq!(
+                (*entity).timing(),
+                crate::ktimer::RtTiming::new(100, 25, 25)
+            );
             assert!((*entity).is_active());
         }
     }
