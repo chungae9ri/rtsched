@@ -48,21 +48,65 @@ impl GlobalKTimerQueue {
 
 unsafe impl Sync for GlobalKTimerQueue {}
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RtTiming {
+    /// Time between releases of consecutive jobs, when the next job is released.
+    period_ticks: u32,
+    /// Relative deadline for each released job, when this job must complete by.
+    relative_deadline_ticks: u32,
+    /// Maximum runtime budget charged to the current job window.
+    /// How much CPU time it is allowed to consume.
+    budget_ticks: u32,
+}
+
+impl RtTiming {
+    pub const fn new(period_ticks: u32, relative_deadline_ticks: u32, budget_ticks: u32) -> Self {
+        Self {
+            period_ticks,
+            relative_deadline_ticks,
+            budget_ticks,
+        }
+    }
+
+    pub const fn from_period(period_ticks: u32) -> Self {
+        Self::new(period_ticks, period_ticks, period_ticks)
+    }
+
+    pub const fn period_ticks(&self) -> u32 {
+        self.period_ticks
+    }
+
+    pub const fn relative_deadline_ticks(&self) -> u32 {
+        self.relative_deadline_ticks
+    }
+
+    pub const fn budget_ticks(&self) -> u32 {
+        self.budget_ticks
+    }
+}
+
 #[repr(C)]
 pub(crate) struct KTimerEntity {
     deadline_at: u64,
     node: RbNode,
     active: bool,
     pub miss_cnt: u32,
+    timing: RtTiming,
 }
 
 impl KTimerEntity {
+    #[allow(dead_code)]
     pub const fn new(deadline_ticks: u32) -> Self {
+        Self::new_with_timing(deadline_ticks, RtTiming::from_period(deadline_ticks))
+    }
+
+    pub const fn new_with_timing(deadline_ticks: u32, timing: RtTiming) -> Self {
         Self {
             deadline_at: deadline_ticks as u64,
             node: RbNode::new(),
             active: true,
             miss_cnt: 0,
+            timing,
         }
     }
 
@@ -123,6 +167,22 @@ impl KTimerEntity {
         self.active = active;
     }
 
+    pub fn timing(&self) -> RtTiming {
+        self.timing
+    }
+
+    pub fn period_ticks(&self) -> u32 {
+        self.timing.period_ticks()
+    }
+
+    pub fn relative_deadline_ticks(&self) -> u32 {
+        self.timing.relative_deadline_ticks()
+    }
+
+    pub fn budget_ticks(&self) -> u32 {
+        self.timing.budget_ticks()
+    }
+
     /// Recover the owning RT timer from its embedded timer entity.
     ///
     /// # Safety
@@ -138,39 +198,22 @@ impl KTimerEntity {
             .wrapping_sub(offset_of!(RtKTimer, entity))
             .cast::<RtKTimer>()
     }
-
-    /// Recover the owning CFS timer from its embedded timer entity.
-    ///
-    /// # Safety
-    ///
-    /// `entity` must be non-null and must point to the `entity` field of the
-    /// live global `CFS_KTIMER`. Passing any RT timer entity, the wait timer
-    /// entity, or unrelated storage produces an invalid owner pointer.
-    pub unsafe fn cfs_ktimer(entity: *mut Self) -> *mut CfsKTimer {
-        debug_assert!(!entity.is_null());
-        debug_assert!(is_cfs_ktimer(entity));
-
-        (entity as *mut u8)
-            .wrapping_sub(offset_of!(CfsKTimer, entity))
-            .cast::<CfsKTimer>()
-    }
 }
 
 #[repr(C)]
 pub(crate) struct CfsKTimer {
     pub entity: KTimerEntity,
     pub name: &'static str,
-    period_ticks: u32,
-    pub execution_ticks: u32,
 }
 
 impl CfsKTimer {
     pub const fn new(period_ticks: u32, execution_ticks: u32, name: &'static str) -> Self {
         Self {
-            entity: KTimerEntity::new(period_ticks),
+            entity: KTimerEntity::new_with_timing(
+                period_ticks,
+                RtTiming::new(period_ticks, execution_ticks, execution_ticks),
+            ),
             name,
-            period_ticks,
-            execution_ticks,
         }
     }
 
@@ -178,12 +221,19 @@ impl CfsKTimer {
         ptr::addr_of_mut!(self.entity)
     }
 
+    #[allow(dead_code)]
     pub fn execution_ticks(&self) -> u32 {
-        self.execution_ticks
+        self.entity.relative_deadline_ticks()
     }
 
+    #[allow(dead_code)]
     pub fn period_ticks(&self) -> u32 {
-        self.period_ticks
+        self.entity.period_ticks()
+    }
+
+    #[allow(dead_code)]
+    pub fn timing(&self) -> RtTiming {
+        self.entity.timing()
     }
 }
 
@@ -201,6 +251,7 @@ impl WaitKTimer {
                 node: RbNode::new(),
                 active: false,
                 miss_cnt: 0,
+                timing: RtTiming::new(0, 0, 0),
             },
             name: "wait",
         }
@@ -211,48 +262,10 @@ impl WaitKTimer {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RtTiming {
-    /// Time between releases of consecutive jobs, when the next job is released.
-    period_ticks: u32,
-    /// Relative deadline for each released job, when this job must complete by.
-    relative_deadline_ticks: u32,
-    /// Maximum runtime budget charged to the current job window.
-    /// How much CPU time it is allowed to consume.
-    budget_ticks: u32,
-}
-
-impl RtTiming {
-    pub const fn new(period_ticks: u32, relative_deadline_ticks: u32, budget_ticks: u32) -> Self {
-        Self {
-            period_ticks,
-            relative_deadline_ticks,
-            budget_ticks,
-        }
-    }
-
-    pub const fn from_period(period_ticks: u32) -> Self {
-        Self::new(period_ticks, period_ticks, period_ticks)
-    }
-
-    pub const fn period_ticks(&self) -> u32 {
-        self.period_ticks
-    }
-
-    pub const fn relative_deadline_ticks(&self) -> u32 {
-        self.relative_deadline_ticks
-    }
-
-    pub const fn budget_ticks(&self) -> u32 {
-        self.budget_ticks
-    }
-}
-
 #[repr(C)]
 pub struct RtKTimer {
     pub(crate) entity: KTimerEntity,
     pub name: &'static str,
-    timing: RtTiming,
     thread_ctx: *mut ThreadCtx,
 }
 
@@ -267,9 +280,8 @@ impl RtKTimer {
         name: &'static str,
     ) -> Self {
         Self {
-            entity: KTimerEntity::new(timing.relative_deadline_ticks()),
+            entity: KTimerEntity::new_with_timing(timing.relative_deadline_ticks(), timing),
             name,
-            timing,
             thread_ctx,
         }
     }
@@ -283,19 +295,19 @@ impl RtKTimer {
     }
 
     pub fn timing(&self) -> RtTiming {
-        self.timing
+        self.entity.timing()
     }
 
     pub fn period_ticks(&self) -> u32 {
-        self.timing.period_ticks()
+        self.entity.period_ticks()
     }
 
     pub fn relative_deadline_ticks(&self) -> u32 {
-        self.timing.relative_deadline_ticks()
+        self.entity.relative_deadline_ticks()
     }
 
     pub fn budget_ticks(&self) -> u32 {
-        self.timing.budget_ticks()
+        self.entity.budget_ticks()
     }
 
     pub(crate) fn init_rt_ktimer(&mut self, thread_ctx: *mut ThreadCtx) {
@@ -371,19 +383,23 @@ unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
 }
 
 unsafe fn cfs_period_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*KTimerEntity::cfs_ktimer(entity)).period_ticks() }
+    unsafe { (*entity).period_ticks() }
+}
+
+unsafe fn cfs_execution_ticks(entity: *mut KTimerEntity) -> u32 {
+    unsafe { (*entity).relative_deadline_ticks() }
 }
 
 unsafe fn rt_period_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*KTimerEntity::rt_ktimer(entity)).period_ticks() }
+    unsafe { (*entity).period_ticks() }
 }
 
 unsafe fn rt_relative_deadline_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*KTimerEntity::rt_ktimer(entity)).relative_deadline_ticks() }
+    unsafe { (*entity).relative_deadline_ticks() }
 }
 
 unsafe fn rt_budget_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*KTimerEntity::rt_ktimer(entity)).budget_ticks() }
+    unsafe { (*entity).budget_ticks() }
 }
 
 unsafe fn set_rt_active_deadline_after_runtime(
@@ -524,17 +540,17 @@ unsafe fn print_ktimer_statistics(
             if thread_ctx.is_null() {
                 crate::rtsched_println!(
                     "    rt timing: period={} relative_deadline={} budget={} thread=<none>",
-                    (*rt_ktimer).period_ticks(),
-                    (*rt_ktimer).relative_deadline_ticks(),
-                    (*rt_ktimer).budget_ticks()
+                    (*entity).period_ticks(),
+                    (*entity).relative_deadline_ticks(),
+                    (*entity).budget_ticks()
                 );
             } else {
                 let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(thread_ctx));
                 crate::rtsched_println!(
                     "    rt timing: period={} relative_deadline={} budget={} thread_id={} thread_state={} runtime={}",
-                    (*rt_ktimer).period_ticks(),
-                    (*rt_ktimer).relative_deadline_ticks(),
-                    (*rt_ktimer).budget_ticks(),
+                    (*entity).period_ticks(),
+                    (*entity).relative_deadline_ticks(),
+                    (*entity).budget_ticks(),
                     (*thread_ctx).id,
                     thread_state_name((*thread_ctx).state),
                     (*rt_thread).runtime
@@ -1254,7 +1270,7 @@ unsafe fn scheduler_timer_reload_for_entity(
         let reload = if is_cfs_ktimer(entity) {
             let ticks = (*entity)
                 .remaining_at(queue.now_ticks())
-                .min((*KTimerEntity::cfs_ktimer(entity)).execution_ticks());
+                .min(cfs_execution_ticks(entity));
             programmable_reload_from_ticks(ticks)
         } else {
             let raw_reload = (*entity)
@@ -1913,6 +1929,7 @@ mod tests {
         assert_eq!(ktimer.relative_deadline_ticks(), 40);
         assert_eq!(ktimer.budget_ticks(), 20);
         assert_eq!(ktimer.timing(), RtTiming::new(100, 40, 20));
+        assert_eq!(ktimer.entity.timing(), RtTiming::new(100, 40, 20));
         assert_eq!(ktimer.entity.deadline_at(), 40);
     }
 

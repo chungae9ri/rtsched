@@ -147,15 +147,16 @@ pub struct KTimerEntity {
     node: RbNode,
     active: bool,
     pub miss_cnt: u32,
+    timing: RtTiming,
 }
 ```
 `KTimerEntity` stores intrusive queue state and the next absolute timer
-expiration. Timing policy lives in the owning timer type: `CfsKTimer` keeps the
-CFS `period_ticks`/`execution_ticks`, and `RtKTimer` keeps explicit
-`period_ticks`, `relative_deadline_ticks`, and `budget_ticks` values.
+expiration. `KTimerEntity` also owns the `RtTiming` policy values used by both
+CFS and RT timers. For CFS, `period_ticks` is the CFS period and
+`relative_deadline_ticks` is the CFS execution slice.
 The embedded `KTimerEntity` is keyed by the next absolute deadline or release
 time. `SysTick` programming works differently for `CfsKTimer` and `RtKTimer`.
-When `CfsKTimer` switches to active, it programs `SysTick` with its `execution_ticks`.
+When `CfsKTimer` switches to active, it programs `SysTick` with its execution slice.
 When `CfsKTimer` is switched out, its `deadline_at` is set to the end of the current CFS period and
 the timer is marked `inactive`.
 
@@ -209,8 +210,9 @@ larger numeric priority gets a minimum CPU resource slot for running.
 CFS threads are moved between the `RunQueue` and the `WaitQueue` rbtree by using
 `RbNode` in the `SchedEntity`.
 
-CFS has a dedicated `CfsKTimer` with `period_ticks` and `execution_ticks`. `execution_ticks` is the
-time slice for one CFS scheduling window.
+CFS has a dedicated `CfsKTimer` whose embedded `KTimerEntity` stores
+`period_ticks` and the execution slice in `relative_deadline_ticks`. The
+execution slice is the time slice for one CFS scheduling window.
 
 CFS scheduling is used for non-time critical threads such as shell thread for user interaction.
 
