@@ -7,7 +7,7 @@ mod imp {
     use core::ptr;
 
     use crate::runq::CFS_RUN_QUEUE;
-    use crate::sched::{CURRENT_THREAD_IS_CFS, is_idle_thread};
+    use crate::sched::{CURRENT_THREAD_IS_CFS, is_idle_thread, reset_scheduler_started};
     use crate::thread::{ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity};
 
     #[unsafe(no_mangle)]
@@ -33,6 +33,7 @@ mod imp {
                 (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
             }
             (*thread_ptr).set_state(ThreadState::Running);
+            reset_scheduler_started();
             START_THREAD_PTR = thread_ptr;
             CURRENT_THREAD_IS_CFS = true;
             asm!("svc 0", options(noreturn));
@@ -69,7 +70,13 @@ mod imp {
         "ldr r0, =START_THREAD_PTR",
         "ldr r0, [r0]", // r0 = thread
         "ldr r3, =CURRENT_THREAD_CTX",
-        "str r0, [r3]",          // CURRENT_THREAD_CTX = thread
+        "str r0, [r3]", // CURRENT_THREAD_CTX = thread
+        "dmb sy",
+        "ldr r3, =SCHEDULER_STARTED",
+        "movs r2, #1",
+        "str r2, [r3]",
+        "ldr r3, =CURRENT_THREAD_CTX",
+        "ldr r0, [r3]",          // r0 = thread
         "ldr r1, [r0]",          // r1 = thread->sp
         "ldr lr, [r0, #4]",      // lr = thread->exc_return
         "ldmia r1!, {{r4-r11}}", // restore callee-saved registers
@@ -81,43 +88,77 @@ mod imp {
         ".size SVCall, .-SVCall",
     );
 
-    // PendSV handler used for context switching between threads.
-    // The actual context switch happens in the assembly code, but the scheduler is
-    // called from here to select the next thread to run and update `CURRENT_THREAD_CTX`.
-    // Threads are expected to have their stack frames (PSP) prepared by `forkyi` so that the
-    // assembly code can save and restore them without needing to understand the layout.
-    global_asm!(
-        ".section .text.PendSV,\"ax\",%progbits",
-        ".global PendSV",
-        ".type PendSV,%function",
-        "PendSV:",
-        "tst lr, #4", // Was the interrupted thread using PSP or MSP
-        "ite eq",
-        "mrseq r0, msp", // Thread used MSP.
-        "mrsne r0, psp", // Thread used PSP.
-        "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
-        "it eq",
-        "vstmdbeq r0!, {{s16-s31}}", // Save callee-saved FP registers when present.
-        "stmdb r0!, {{r4-r11}}",     // Save callee-saved core registers on the thread stack.
-        "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
-        "ldr r2, [r1]",              // R2 = CURRENT_THREAD_CTX thread pointer
-        "str r0, [r2]",              // Save updated stack pointer into the thread control block.
-        "str lr, [r2, #4]", // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
-        "bl schedule", // Run the CURRENT_THREAD_CTX ktimer handler and update CURRENT_THREAD_CTX.
-        "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
-        "ldr r2, [r1]", // R2 = next thread pointer
-        "ldr r0, [r2]", // R0 = next thread's saved SP
-        "ldr lr, [r2, #4]", // LR = next thread's saved EXC_RETURN
-        "ldmia r0!, {{r4-r11}}", // Restore callee-saved core registers for the selected thread.
-        "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
-        "it eq",
-        "vldmiaeq r0!, {{s16-s31}}", // Restore callee-saved FP registers when present.
-        "tst lr, #4",                // Does the next thread return using MSP or PSP?
-        "ite eq",
-        "msreq msp, r0", // Restore MSP-backed context.
-        "msrne psp, r0", // Restore PSP-backed context.
-        "bx lr",
+    macro_rules! pendsv_handler {
+        ($($sched_isr_timing:literal,)*) => {
+            // PendSV handler used for context switching between threads.
+            // The actual context switch happens in the assembly code, but the scheduler is
+            // called from here to select the next thread to run and update `CURRENT_THREAD_CTX`.
+            // Threads are expected to have their stack frames (PSP) prepared by `forkyi` so that the
+            // assembly code can save and restore them without needing to understand the layout.
+            global_asm!(
+                ".section .text.PendSV,\"ax\",%progbits",
+                ".global PendSV",
+                ".type PendSV,%function",
+                "PendSV:",
+                "tst lr, #4", // Was the interrupted thread using PSP or MSP
+                "ite eq",
+                "mrseq r0, msp", // Thread used MSP.
+                "mrsne r0, psp", // Thread used PSP.
+                "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
+                "it eq",
+                "vstmdbeq r0!, {{s16-s31}}", // Save callee-saved FP registers when present.
+                "stmdb r0!, {{r4-r11}}",     // Save callee-saved core registers on the thread stack.
+                "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
+                "ldr r2, [r1]",              // R2 = CURRENT_THREAD_CTX thread pointer
+                "str r0, [r2]",              // Save updated stack pointer into the thread control block.
+                "str lr, [r2, #4]", // Save EXC_RETURN so the next restore uses MSP or PSP correctly.
+                "bl schedule", // Run the CURRENT_THREAD_CTX ktimer handler and update CURRENT_THREAD_CTX.
+                "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
+                "ldr r2, [r1]", // R2 = next thread pointer
+                "ldr r0, [r2]", // R0 = next thread's saved SP
+                "ldr lr, [r2, #4]", // LR = next thread's saved EXC_RETURN
+                "ldmia r0!, {{r4-r11}}", // Restore callee-saved core registers for the selected thread.
+                "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
+                "it eq",
+                "vldmiaeq r0!, {{s16-s31}}", // Restore callee-saved FP registers when present.
+                "tst lr, #4",                // Does the next thread return using MSP or PSP?
+                "ite eq",
+                "msreq msp, r0", // Restore MSP-backed context.
+                "msrne psp, r0", // Restore PSP-backed context.
+                $($sched_isr_timing,)*
+                "bx lr",
+            );
+        };
+    }
+
+    #[cfg(feature = "sched-isr-timing")]
+    pendsv_handler!(
+        "ldr r1, =SCHED_TICK_TO_PENDSV_ARMED",
+        "ldr r2, [r1]",
+        "cbz r2, 1f",
+        "movs r2, #0",
+        "str r2, [r1]",
+        "ldr r1, =0xE0001004", // DWT CYCCNT
+        "ldr r3, [r1]",
+        "ldr r1, =SCHED_TICK_TO_PENDSV_START_CYCLE",
+        "ldr r2, [r1]",
+        "subs r3, r3, r2",
+        "ldr r1, =SCHED_TICK_TO_PENDSV_LAST_TICKS",
+        "str r3, [r1]",
+        "ldr r1, =SCHED_TICK_TO_PENDSV_SAMPLES",
+        "ldr r2, [r1]",
+        "adds r2, r2, #1",
+        "str r2, [r1]",
+        "ldr r1, =SCHED_TICK_TO_PENDSV_MAX_TICKS",
+        "ldr r2, [r1]",
+        "cmp r2, r3",
+        "it lo",
+        "strlo r3, [r1]",
+        "1:",
     );
+
+    #[cfg(not(feature = "sched-isr-timing"))]
+    pendsv_handler!();
 }
 
 #[cfg(target_arch = "arm")]

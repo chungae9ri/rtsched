@@ -24,6 +24,7 @@ bench = false
 
 [features]
 embedded-examples = []
+sched-isr-timing = []
 
 [dependencies]
 cortex-m = "0.7.7"

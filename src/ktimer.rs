@@ -1173,7 +1173,11 @@ fn sync_type_name(waitevt: Option<SyncType>) -> &'static str {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
@@ -1531,10 +1535,10 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_LOCK;
     use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadState};
-    use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use crate::waitq::{insert_wait_thread, wait_entity, WaitEntity, WAIT_QUEUE};
+    use crate::TEST_LOCK;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::string::String;
     use std::sync::Mutex;
     use std::vec::Vec;
@@ -2158,16 +2162,12 @@ mod tests {
 
         assert!(result.is_err());
         let printed = DEADLINE_MISS_PRINTED.lock().unwrap();
-        assert!(
-            printed
-                .iter()
-                .any(|message| message.contains("ktimer queue statistics"))
-        );
-        assert!(
-            printed
-                .iter()
-                .any(|message| message.contains("thread statistics"))
-        );
+        assert!(printed
+            .iter()
+            .any(|message| message.contains("ktimer queue statistics")));
+        assert!(printed
+            .iter()
+            .any(|message| message.contains("thread statistics")));
         assert_eq!(ktimer.entity.miss_cnt, 1);
         assert_eq!(rt.runtime, 55);
         assert!(ktimer.entity.is_active());
