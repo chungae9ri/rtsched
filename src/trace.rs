@@ -3,6 +3,8 @@
 
 //! Lightweight scheduler tracing hooks.
 
+#[cfg(feature = "sched-isr-timing")]
+use core::ptr;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::thread::ThreadCtx;
@@ -64,6 +66,17 @@ pub struct TraceCounters {
     pub yields: u32,
 }
 
+/// DWT-cycle timing for the SysTick-to-PendSV path.
+///
+/// On boards where SysTick uses the core clock, these cycle counts are the same
+/// raw tick unit used by scheduler deadlines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedIsrTiming {
+    pub samples: u32,
+    pub last_ticks: u32,
+    pub max_ticks: u32,
+}
+
 pub type TraceFn = fn(TraceEvent);
 
 static TRACE_FN: AtomicUsize = AtomicUsize::new(0);
@@ -71,6 +84,25 @@ static CONTEXT_SWITCHES: AtomicU32 = AtomicU32::new(0);
 static DEADLINE_MISSES: AtomicU32 = AtomicU32::new(0);
 static WAKEUPS: AtomicU32 = AtomicU32::new(0);
 static YIELDS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_ENABLED: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_ARMED: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_START_CYCLE: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_LAST_TICKS: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_MAX_TICKS: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_TO_PENDSV_SAMPLES: u32 = 0;
 
 /// Register a trace callback for scheduler events.
 pub fn set_trace_fn(trace_fn: TraceFn) {
@@ -98,6 +130,69 @@ pub fn reset_trace_counters() {
     DEADLINE_MISSES.store(0, Ordering::Relaxed);
     WAKEUPS.store(0, Ordering::Relaxed);
     YIELDS.store(0, Ordering::Relaxed);
+}
+
+/// Mark the beginning of a SysTick interrupt for SysTick-to-PendSV timing.
+///
+/// Call this as the first statement in the board's `SysTick` handler after the
+/// DWT cycle counter has been initialized. A sample is recorded only when that
+/// same `handle_sched_tick` path requests a context switch.
+#[inline]
+pub fn mark_sched_tick_to_pendsv_start() {
+    #[cfg(feature = "sched-isr-timing")]
+    {
+        let start_cycle = crate::arch::platform::dwt_cycle_count();
+
+        unsafe {
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_ENABLED, 1);
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_START_CYCLE, start_cycle);
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn arm_sched_tick_to_pendsv_sample() {
+    #[cfg(feature = "sched-isr-timing")]
+    {
+        unsafe {
+            if ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_ENABLED) != 0 {
+                ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_ARMED, 1);
+            }
+        }
+    }
+}
+
+#[inline]
+pub fn sched_tick_to_pendsv_timing() -> SchedIsrTiming {
+    #[cfg(feature = "sched-isr-timing")]
+    {
+        unsafe {
+            return SchedIsrTiming {
+                samples: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_SAMPLES),
+                last_ticks: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_LAST_TICKS),
+                max_ticks: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_MAX_TICKS),
+            };
+        }
+    }
+
+    #[cfg(not(feature = "sched-isr-timing"))]
+    {
+        SchedIsrTiming::default()
+    }
+}
+
+#[inline]
+pub fn reset_sched_tick_to_pendsv_timing() {
+    #[cfg(feature = "sched-isr-timing")]
+    {
+        unsafe {
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_ARMED, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_START_CYCLE, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_LAST_TICKS, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_MAX_TICKS, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_SAMPLES, 0);
+        }
+    }
 }
 
 pub(crate) fn record_context_switch(from: *const ThreadCtx, to: *const ThreadCtx) {

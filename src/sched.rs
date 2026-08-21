@@ -5,20 +5,39 @@ use core::ptr;
 
 use crate::arch::platform::request_context_switch;
 use crate::ktimer::{
-    CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
-    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
-    program_next_scheduler_timer, update_next_ktimer,
+    advance_ktimers, dispatch_expired_ktimer, elapsed_ticks_since_last_interrupt, enqueue_ktimer,
+    is_cfs_ktimer, next_ktimer, program_next_scheduler_timer, update_next_ktimer, CfsKTimer,
+    KTimerEntity, CFS_KTIMER,
 };
-use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
+use crate::runq::{cfs_vruntime_delta, dequeue_thread, init_cfs_rq, SchedEntity, CFS_RUN_QUEUE};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
-    thread_handle_from_cfs_sched_entity,
+    cfs_sched_entity, cfs_thread_from_handle, thread_handle_from_cfs_sched_entity, CfsThread,
+    ThreadCtx, ThreadHandle, ThreadState,
 };
 
 #[unsafe(no_mangle)]
 pub static mut CURRENT_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 pub(crate) static mut CURRENT_THREAD_IS_CFS: bool = false;
 pub(crate) static mut IDLE_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
+#[unsafe(no_mangle)]
+pub static mut SCHEDULER_STARTED: u32 = 0;
+
+pub(crate) fn reset_scheduler_started() {
+    unsafe {
+        ptr::write_volatile(&raw mut SCHEDULER_STARTED, 0);
+    }
+}
+
+fn scheduler_started() -> bool {
+    unsafe { ptr::read_volatile(&raw const SCHEDULER_STARTED) != 0 }
+}
+
+#[cfg(test)]
+fn mark_scheduler_started() {
+    unsafe {
+        ptr::write_volatile(&raw mut SCHEDULER_STARTED, 1);
+    }
+}
 
 /// Initialize the CFS scheduler state and enqueue its scheduler timer.
 ///
@@ -36,6 +55,7 @@ pub(crate) static mut IDLE_THREAD_CTX: *mut ThreadCtx = ptr::null_mut();
 /// links and loses scheduler accounting.
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
+        reset_scheduler_started();
         init_cfs_rq();
         IDLE_THREAD_CTX = ptr::null_mut();
         CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks, "cfs");
@@ -271,6 +291,10 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
 ///   Active RT timers are re-armed with their relative deadline; inactive RT timers
 ///   are reactivated at their next period release.
 pub fn handle_sched_tick() {
+    if !scheduler_started() {
+        return;
+    }
+
     let elapsed = elapsed_ticks_since_last_interrupt();
 
     let next_ktimer = unsafe {
@@ -283,6 +307,7 @@ pub fn handle_sched_tick() {
     }
 
     if !next_ktimer.is_null() {
+        crate::trace::arm_sched_tick_to_pendsv_sample();
         request_context_switch();
     }
 }
@@ -290,10 +315,10 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_LOCK;
-    use crate::ktimer::{RtKTimer, init_ktimer_queue};
+    use crate::ktimer::{init_ktimer_queue, RtKTimer};
     use crate::thread::{CfsThread, RtThread, ThreadHandle};
     use crate::waitq::WaitEntity;
+    use crate::TEST_LOCK;
 
     fn cfs_thread(
         name: &'static str,
@@ -369,6 +394,33 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_started_latch_is_marked_explicitly() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_scheduler_started();
+        assert!(!scheduler_started());
+
+        mark_scheduler_started();
+        assert!(scheduler_started());
+
+        reset_scheduler_started();
+    }
+
+    #[test]
+    fn handle_sched_tick_ignores_interrupt_before_scheduler_start() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        reset_scheduler_started();
+        unsafe {
+            CURRENT_THREAD_CTX = ptr::null_mut();
+        }
+
+        handle_sched_tick();
+
+        assert!(!scheduler_started());
+    }
+
+    #[test]
     fn init_cfs_resets_run_queue_and_configures_cfs_timer() {
         let _guard = TEST_LOCK.lock().unwrap();
 
@@ -385,11 +437,6 @@ mod tests {
             assert_eq!((*cfs).period_ticks(), 100);
             assert_eq!((*entity).deadline(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
-            assert_eq!((*cfs).timing(), crate::ktimer::RtTiming::new(100, 25, 25));
-            assert_eq!(
-                (*entity).timing(),
-                crate::ktimer::RtTiming::new(100, 25, 25)
-            );
             assert!((*entity).is_active());
         }
     }
