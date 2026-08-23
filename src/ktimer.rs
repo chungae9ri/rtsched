@@ -974,8 +974,7 @@ pub(crate) unsafe fn dispatch_expired_ktimer(elapsed: u32) -> *mut KTimerEntity 
 
 pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
     critical_section(|| unsafe {
-        let queue = &mut *KTIMER_QUEUE.get();
-        NEXT_KTIMER = normalize_next_ktimer(queue, entity);
+        NEXT_KTIMER = entity;
     });
 }
 
