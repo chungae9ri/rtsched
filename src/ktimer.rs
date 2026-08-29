@@ -7,6 +7,7 @@
 //! inserting ktimers does not allocate.
 
 use core::cell::UnsafeCell;
+use core::cmp::Ordering;
 use core::mem::offset_of;
 use core::ptr;
 
@@ -963,13 +964,13 @@ fn elapsed_ticks_from_platform_timer() -> u32 {
 }
 
 pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
-    critical_section(|| unsafe {
+    unsafe {
         (*KTIMER_QUEUE.get()).advance_time(elapsed);
-    });
+    }
 }
 
 pub(crate) unsafe fn dispatch_expired_ktimer(elapsed: u32) -> *mut KTimerEntity {
-    critical_section(|| unsafe { (*KTIMER_QUEUE.get()).dispatch_expired(elapsed) })
+    unsafe { (*KTIMER_QUEUE.get()).dispatch_expired(elapsed) }
 }
 
 pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
@@ -1172,11 +1173,7 @@ fn sync_type_name(waitevt: Option<SyncType>) -> &'static str {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value {
-        "yes"
-    } else {
-        "no"
-    }
+    if value { "yes" } else { "no" }
 }
 
 unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
@@ -1349,6 +1346,7 @@ unsafe impl RBTreeNode for KTimerEntity {
 
 pub struct KTimerQueue {
     tree: RBTree<KTimerEntity>,
+    left_most: *mut RbNode,
     now_ticks: u64,
 }
 
@@ -1356,6 +1354,7 @@ impl KTimerQueue {
     pub const fn new() -> Self {
         Self {
             tree: RBTree::new(),
+            left_most: ptr::null_mut(),
             now_ticks: 0,
         }
     }
@@ -1376,7 +1375,7 @@ impl KTimerQueue {
     }
 
     pub fn first(&self) -> *mut KTimerEntity {
-        self.tree.first()
+        <KTimerEntity as RBTreeNode>::entity_of(self.left_most)
     }
 
     #[allow(dead_code)]
@@ -1429,12 +1428,17 @@ impl KTimerQueue {
     /// mutations.
     pub unsafe fn dispatch_expired(&mut self, elapsed: u32) -> *mut KTimerEntity {
         unsafe {
-            while let Some(expired) = self.pop_first() {
-                let expired = expired as *mut KTimerEntity;
-                if !(*expired).is_expired_at(self.now_ticks) {
-                    self.insert(expired);
-                    break;
+            loop {
+                let (expired, first_active) = self.first_and_first_active();
+                if expired.is_null() || !(*expired).is_expired_at(self.now_ticks) {
+                    return if first_active.is_null() {
+                        activate_cfs_ktimer()
+                    } else {
+                        first_active
+                    };
                 }
+
+                self.remove(expired);
 
                 if is_wait_ktimer(expired) {
                     wake_wait_thread(self, elapsed);
@@ -1466,13 +1470,6 @@ impl KTimerQueue {
                     self.insert(expired);
                 }
             }
-
-            let next = self.first_active();
-            if next.is_null() {
-                activate_cfs_ktimer()
-            } else {
-                next
-            }
         }
     }
 
@@ -1486,7 +1483,17 @@ impl KTimerQueue {
     /// queue and serialize insertion against scheduler interrupts and other
     /// queue mutations.
     pub unsafe fn insert(&mut self, entity: *mut KTimerEntity) {
-        unsafe { self.tree.insert(entity) }
+        unsafe {
+            self.tree.insert(entity);
+            if self.left_most.is_null()
+                || <KTimerEntity as RBTreeNode>::cmp(
+                    entity.cast_const(),
+                    <KTimerEntity as RBTreeNode>::entity_of_const(self.left_most),
+                ) == Ordering::Less
+            {
+                self.left_most = <KTimerEntity as RBTreeNode>::node(entity);
+            }
+        }
     }
 
     /// Remove a ktimer entity from the queue.
@@ -1497,7 +1504,25 @@ impl KTimerQueue {
     /// must hold exclusive access to the queue and serialize removal against
     /// scheduler interrupts and other queue mutations.
     pub unsafe fn remove(&mut self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
-        unsafe { self.tree.remove(entity) }
+        unsafe {
+            let removing_left_most = !entity.is_null()
+                && ptr::eq(
+                    <KTimerEntity as RBTreeNode>::node(entity).cast_const(),
+                    self.left_most.cast_const(),
+                );
+            let next_left_most = if removing_left_most {
+                <KTimerEntity as RBTreeNode>::node(self.tree.next(entity))
+            } else {
+                ptr::null_mut()
+            };
+
+            let removed = self.tree.remove(entity);
+            if removing_left_most {
+                self.left_most = next_left_most;
+            }
+
+            removed
+        }
     }
 
     /// Remove and return the earliest ktimer entity in the queue.
@@ -1508,20 +1533,35 @@ impl KTimerQueue {
     /// mutation and backed by storage that outlives the returned borrow.
     /// Callers must hold exclusive access to the queue and serialize removal
     /// against scheduler interrupts and other queue mutations.
+    #[allow(dead_code)]
     pub unsafe fn pop_first(&mut self) -> Option<&mut KTimerEntity> {
-        unsafe { self.tree.pop_first() }
+        let first = self.first();
+        if first.is_null() {
+            return None;
+        }
+
+        unsafe {
+            self.remove(first);
+            Some(&mut *first)
+        }
     }
 
-    pub fn first_active(&self) -> *mut KTimerEntity {
-        let mut entity = self.first();
+    fn first_and_first_active(&self) -> (*mut KTimerEntity, *mut KTimerEntity) {
+        let first = self.first();
+        let mut entity = first;
+
         while !entity.is_null() {
             if unsafe { (*entity).is_active() } {
-                return entity;
+                return (first, entity);
             }
             entity = self.next(entity);
         }
 
-        ptr::null_mut()
+        (first, ptr::null_mut())
+    }
+
+    pub fn first_active(&self) -> *mut KTimerEntity {
+        self.first_and_first_active().1
     }
 }
 
@@ -1534,10 +1574,10 @@ impl Default for KTimerQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadState};
-    use crate::waitq::{insert_wait_thread, wait_entity, WaitEntity, WAIT_QUEUE};
     use crate::TEST_LOCK;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadState};
+    use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::string::String;
     use std::sync::Mutex;
     use std::vec::Vec;
@@ -1896,6 +1936,46 @@ mod tests {
     }
 
     #[test]
+    fn left_most_cache_tracks_queue_mutations() {
+        let mut queue = KTimerQueue::new();
+        let mut late = KTimerEntity::new(30);
+        let mut early = KTimerEntity::new(5);
+        let mut middle = KTimerEntity::new(20);
+
+        assert!(queue.left_most.is_null());
+
+        unsafe {
+            queue.insert(&mut late);
+        }
+        assert!(ptr::eq(queue.first(), &late));
+
+        unsafe {
+            queue.insert(&mut early);
+        }
+        assert!(ptr::eq(queue.first(), &early));
+
+        unsafe {
+            queue.insert(&mut middle);
+        }
+        assert!(ptr::eq(queue.first(), &early));
+
+        unsafe {
+            queue.remove(&mut early);
+        }
+        assert!(ptr::eq(queue.first(), &middle));
+
+        let popped = unsafe { queue.pop_first() }.unwrap() as *mut KTimerEntity;
+        assert!(ptr::eq(popped, ptr::addr_of_mut!(middle)));
+        assert!(ptr::eq(queue.first(), &late));
+
+        unsafe {
+            queue.remove(&mut late);
+        }
+        assert!(queue.left_most.is_null());
+        assert!(queue.first().is_null());
+    }
+
+    #[test]
     fn pop_first_returns_timers_in_deadline_order() {
         let mut queue = KTimerQueue::new();
         let mut timers = [
@@ -2161,12 +2241,16 @@ mod tests {
 
         assert!(result.is_err());
         let printed = DEADLINE_MISS_PRINTED.lock().unwrap();
-        assert!(printed
-            .iter()
-            .any(|message| message.contains("ktimer queue statistics")));
-        assert!(printed
-            .iter()
-            .any(|message| message.contains("thread statistics")));
+        assert!(
+            printed
+                .iter()
+                .any(|message| message.contains("ktimer queue statistics"))
+        );
+        assert!(
+            printed
+                .iter()
+                .any(|message| message.contains("thread statistics"))
+        );
         assert_eq!(ktimer.entity.miss_cnt, 1);
         assert_eq!(rt.runtime, 55);
         assert!(ktimer.entity.is_active());
