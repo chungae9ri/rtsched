@@ -70,10 +70,10 @@ mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
+    AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
+    ThreadEntry, ThreadHandle, ThreadId, ThreadRef, ThreadSpawnError, ThreadStart, ThreadState,
     current_rt_thread_runtime, current_thread, current_thread_id, msleepyi,
-    set_rt_thread_start_time, yieldyi, AlignedStack, CfsThread, CfsThreadBuilder, RtThread,
-    RtThreadBuilder, SchedInfo, ThreadCtx, ThreadEntry, ThreadHandle, ThreadId, ThreadRef,
-    ThreadSpawnError, ThreadStart, ThreadState,
+    set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
@@ -81,15 +81,16 @@ pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 pub use print::set_print_fn;
 
 pub use arch::cm::platform::{
+    ContextSwitchPort, CortexMPlatform, CriticalSectionPort, CycleCounterPort, DefaultPlatform,
+    HostPlatform, InitialThreadContext, Platform, SchedulerTimerPort, ThreadStackPort,
     dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
-    init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread, ContextSwitchPort,
-    CortexMPlatform, CriticalSectionPort, CycleCounterPort, DefaultPlatform, HostPlatform,
-    InitialThreadContext, Platform, SchedulerTimerPort, ThreadStackPort,
+    init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread,
 };
 
 pub use ktimer::{
-    dequeue_rt_thread_to_waitq, enqueue_rt_thread_from_waitq, init_ktimer_queue, is_active_ktimer,
-    next_ktimer_reload, traverse_ktimer_queue, traverse_ktimer_queue_fn, RtKTimer, RtTiming,
+    RtKTimer, RtTiming, dequeue_rt_thread_to_waitq, enqueue_rt_thread_from_waitq,
+    init_ktimer_queue, is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue,
+    traverse_ktimer_queue_fn,
 };
 
 pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
@@ -101,18 +102,18 @@ pub use sync::{
 };
 
 pub use trace::{
-    clear_trace_fn, mark_sched_tick_to_pendsv_start, reset_sched_tick_to_pendsv_timing,
-    reset_trace_counters, sched_tick_to_pendsv_timing, set_trace_fn, trace_counters,
-    SchedIsrTiming, TraceCounters, TraceEvent, TraceFn, TraceThread,
+    SchedIsrTiming, TraceCounters, TraceEvent, TraceFn, TraceThread, clear_trace_fn,
+    mark_sched_tick_to_pendsv_start, reset_sched_tick_to_pendsv_timing, reset_trace_counters,
+    sched_tick_to_pendsv_timing, set_trace_fn, trace_counters,
 };
 
-pub use waitq::{traverse_wait_queue_fn, WaitQueueError};
+pub use waitq::{WaitQueueError, traverse_wait_queue_fn};
 
 #[cfg(all(test, not(target_arch = "arm")))]
 mod tests {
     use super::critical_section;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
     #[test]

@@ -5,14 +5,14 @@ use core::ptr;
 
 use crate::arch::platform::request_context_switch;
 use crate::ktimer::{
-    advance_ktimers, dispatch_expired_ktimer, elapsed_ticks_since_last_interrupt, enqueue_ktimer,
-    is_cfs_ktimer, next_ktimer, program_next_scheduler_timer, update_next_ktimer, CfsKTimer,
-    KTimerEntity, CFS_KTIMER,
+    CFS_KTIMER, CfsKTimer, KTimerEntity, advance_ktimers, dispatch_expired_ktimer,
+    elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
+    program_next_scheduler_timer, update_next_ktimer,
 };
-use crate::runq::{cfs_vruntime_delta, dequeue_thread, init_cfs_rq, SchedEntity, CFS_RUN_QUEUE};
+use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
 use crate::thread::{
-    cfs_sched_entity, cfs_thread_from_handle, thread_handle_from_cfs_sched_entity, CfsThread,
-    ThreadCtx, ThreadHandle, ThreadState,
+    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
+    thread_handle_from_cfs_sched_entity,
 };
 
 #[unsafe(no_mangle)]
@@ -299,7 +299,8 @@ pub fn handle_sched_tick() {
 
     let next_ktimer = unsafe {
         advance_ktimers(elapsed);
-        dispatch_expired_ktimer(elapsed)
+        let next_ktimer = dispatch_expired_ktimer(elapsed);
+        next_ktimer
     };
 
     unsafe {
@@ -315,10 +316,10 @@ pub fn handle_sched_tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ktimer::{init_ktimer_queue, RtKTimer};
+    use crate::TEST_LOCK;
+    use crate::ktimer::{RtKTimer, init_ktimer_queue};
     use crate::thread::{CfsThread, RtThread, ThreadHandle};
     use crate::waitq::WaitEntity;
-    use crate::TEST_LOCK;
 
     fn cfs_thread(
         name: &'static str,

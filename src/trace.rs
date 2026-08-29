@@ -75,6 +75,10 @@ pub struct SchedIsrTiming {
     pub samples: u32,
     pub last_ticks: u32,
     pub max_ticks: u32,
+    pub advance_ktimers_last_ticks: u32,
+    pub advance_ktimers_max_ticks: u32,
+    pub dispatch_expired_ktimer_last_ticks: u32,
+    pub dispatch_expired_ktimer_max_ticks: u32,
 }
 
 pub type TraceFn = fn(TraceEvent);
@@ -103,6 +107,18 @@ pub static mut SCHED_TICK_TO_PENDSV_MAX_TICKS: u32 = 0;
 #[cfg(feature = "sched-isr-timing")]
 #[unsafe(no_mangle)]
 pub static mut SCHED_TICK_TO_PENDSV_SAMPLES: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_ADVANCE_KTIMERS_LAST_TICKS: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_ADVANCE_KTIMERS_MAX_TICKS: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_LAST_TICKS: u32 = 0;
+#[cfg(feature = "sched-isr-timing")]
+#[unsafe(no_mangle)]
+pub static mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_MAX_TICKS: u32 = 0;
 
 /// Register a trace callback for scheduler events.
 pub fn set_trace_fn(trace_fn: TraceFn) {
@@ -163,6 +179,27 @@ pub(crate) fn arm_sched_tick_to_pendsv_sample() {
 }
 
 #[inline]
+#[cfg(feature = "sched-isr-timing")]
+#[allow(unused)]
+pub(crate) fn record_sched_tick_ktimer_timing(
+    advance_ktimers_ticks: u32,
+    dispatch_expired_ktimer_ticks: u32,
+) {
+    unsafe {
+        record_last_and_max(
+            &raw mut SCHED_TICK_ADVANCE_KTIMERS_LAST_TICKS,
+            &raw mut SCHED_TICK_ADVANCE_KTIMERS_MAX_TICKS,
+            advance_ktimers_ticks,
+        );
+        record_last_and_max(
+            &raw mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_LAST_TICKS,
+            &raw mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_MAX_TICKS,
+            dispatch_expired_ktimer_ticks,
+        );
+    }
+}
+
+#[inline]
 pub fn sched_tick_to_pendsv_timing() -> SchedIsrTiming {
     #[cfg(feature = "sched-isr-timing")]
     {
@@ -171,6 +208,18 @@ pub fn sched_tick_to_pendsv_timing() -> SchedIsrTiming {
                 samples: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_SAMPLES),
                 last_ticks: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_LAST_TICKS),
                 max_ticks: ptr::read_volatile(&raw const SCHED_TICK_TO_PENDSV_MAX_TICKS),
+                advance_ktimers_last_ticks: ptr::read_volatile(
+                    &raw const SCHED_TICK_ADVANCE_KTIMERS_LAST_TICKS,
+                ),
+                advance_ktimers_max_ticks: ptr::read_volatile(
+                    &raw const SCHED_TICK_ADVANCE_KTIMERS_MAX_TICKS,
+                ),
+                dispatch_expired_ktimer_last_ticks: ptr::read_volatile(
+                    &raw const SCHED_TICK_DISPATCH_EXPIRED_KTIMER_LAST_TICKS,
+                ),
+                dispatch_expired_ktimer_max_ticks: ptr::read_volatile(
+                    &raw const SCHED_TICK_DISPATCH_EXPIRED_KTIMER_MAX_TICKS,
+                ),
             };
         }
     }
@@ -191,6 +240,10 @@ pub fn reset_sched_tick_to_pendsv_timing() {
             ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_LAST_TICKS, 0);
             ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_MAX_TICKS, 0);
             ptr::write_volatile(&raw mut SCHED_TICK_TO_PENDSV_SAMPLES, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_ADVANCE_KTIMERS_LAST_TICKS, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_ADVANCE_KTIMERS_MAX_TICKS, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_LAST_TICKS, 0);
+            ptr::write_volatile(&raw mut SCHED_TICK_DISPATCH_EXPIRED_KTIMER_MAX_TICKS, 0);
         }
     }
 }
@@ -253,6 +306,17 @@ fn increment(counter: &AtomicU32) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
         value.checked_add(1)
     });
+}
+
+#[cfg(feature = "sched-isr-timing")]
+unsafe fn record_last_and_max(last: *mut u32, max: *mut u32, ticks: u32) {
+    unsafe {
+        ptr::write_volatile(last, ticks);
+
+        if ptr::read_volatile(max) < ticks {
+            ptr::write_volatile(max, ticks);
+        }
+    }
 }
 
 fn emit(event: TraceEvent) {
