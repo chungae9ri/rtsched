@@ -13,9 +13,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::arch::platform::request_context_switch;
 use crate::critical_section;
 use crate::ktimer::{
-    CFS_KTIMER, dequeue_ktimerq_to_waitq, earliest_queued_scheduler_deadline_at,
+    CFS_KTIMER, dequeue_ktimerq_to_waitq, earliest_queued_scheduler_expire_at,
     elapsed_ticks_since_current_reload, enqueue_ktimerq_from_waitq, program_wait_ktimer,
-    set_thread_scheduler_deadline_at, thread_scheduler_deadline_at, yield_ktimer,
+    set_thread_scheduler_expire_at, thread_scheduler_expire_at, yield_ktimer,
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
@@ -660,10 +660,10 @@ unsafe fn boost_owner_deadline(
             return;
         }
 
-        waiter_deadline_at.min(earliest_queued_scheduler_deadline_at())
+        waiter_deadline_at.min(earliest_queued_scheduler_expire_at())
     };
 
-    let owner_deadline_at = unsafe { thread_scheduler_deadline_at(owner) };
+    let owner_deadline_at = unsafe { thread_scheduler_expire_at(owner) };
     if boost_deadline_at >= owner_deadline_at {
         return;
     }
@@ -674,7 +674,7 @@ unsafe fn boost_owner_deadline(
     }
 
     unsafe {
-        set_thread_scheduler_deadline_at(owner, boost_deadline_at);
+        set_thread_scheduler_expire_at(owner, boost_deadline_at);
     }
 }
 
@@ -685,7 +685,7 @@ unsafe fn restore_owner_deadline(state: &mut MutexState, owner: usize) {
 
     if let Some(owner) = unsafe { thread_from_owner_token(owner) } {
         unsafe {
-            set_thread_scheduler_deadline_at(owner, state.owner_original_deadline_at);
+            set_thread_scheduler_expire_at(owner, state.owner_original_deadline_at);
         }
     }
 
@@ -726,7 +726,7 @@ unsafe fn block_current_thread(
         let deadline_at = if current_ktimer.is_null() {
             WAIT_FOREVER_TICKS
         } else {
-            (*current_ktimer).deadline_at()
+            (*current_ktimer).expire_at()
         };
 
         let _ = yield_ktimer(current_ktimer, elapsed, false);
@@ -983,7 +983,7 @@ mod tests {
         unsafe {
             assert_eq!(waiter.thread.state, ThreadState::Waiting);
             assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 10);
-            assert_eq!(owner_timer.entity.deadline_at(), 10);
+            assert_eq!(owner_timer.entity.expire_at(), 10);
             assert!(ptr::eq(next_ktimer(), owner_timer.entity_mut()));
 
             core::mem::forget(waiter_guard);
@@ -995,7 +995,7 @@ mod tests {
         drop(owner_guard);
 
         unsafe {
-            assert_eq!(owner_timer.entity.deadline_at(), 100);
+            assert_eq!(owner_timer.entity.expire_at(), 100);
             assert_eq!(waiter.thread.state, ThreadState::Ready);
             assert!(ptr::eq(
                 rt_ktimer_entity(waiter_handle),
@@ -1037,7 +1037,7 @@ mod tests {
         unsafe {
             assert_eq!(waiter.thread.state, ThreadState::Waiting);
             assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 40);
-            assert_eq!(owner_timer.entity.deadline_at(), 25);
+            assert_eq!(owner_timer.entity.expire_at(), 25);
 
             core::mem::forget(waiter_guard);
             owner.thread.set_state(ThreadState::Running);
@@ -1048,7 +1048,7 @@ mod tests {
         drop(owner_guard);
 
         unsafe {
-            assert_eq!(owner_timer.entity.deadline_at(), 100);
+            assert_eq!(owner_timer.entity.expire_at(), 100);
             assert_eq!(waiter.thread.state, ThreadState::Ready);
 
             CURRENT_THREAD_CTX = ptr::null_mut();
@@ -1088,7 +1088,7 @@ mod tests {
             assert_eq!(waiter.thread.state, ThreadState::Waiting);
             let cfs = ptr::addr_of!(CFS_KTIMER);
             let cfs_entity = ptr::addr_of!((*cfs).entity);
-            assert_eq!((*cfs_entity).deadline_at(), 8);
+            assert_eq!((*cfs_entity).expire_at(), 8);
 
             core::mem::forget(waiter_guard);
             owner.thread.set_state(ThreadState::Running);
@@ -1101,7 +1101,7 @@ mod tests {
         unsafe {
             let cfs = ptr::addr_of!(CFS_KTIMER);
             let cfs_entity = ptr::addr_of!((*cfs).entity);
-            assert_eq!((*cfs_entity).deadline_at(), 25);
+            assert_eq!((*cfs_entity).expire_at(), 25);
             assert_eq!(waiter.thread.state, ThreadState::Ready);
 
             CURRENT_THREAD_CTX = ptr::null_mut();

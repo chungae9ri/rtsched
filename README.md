@@ -47,7 +47,7 @@ of the crate. Example board integrations live in
 | Feature area | What `rtsched` provides |
 | --- | --- |
 | Scheduling scheme | Mixed soft real-time and fair scheduling with EDF-style `RtThread` timers and CFS-style `CfsThread` run queues. |
-| Timer framework | Intrusive red-black tree based `KTimer` queue for deadlines, CFS execution windows, RT releases, and sleep wakeups. |
+| Timer framework | Intrusive red-black tree based `KTimer` queue for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
 | Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting` states, yielding, waiting, and idle-thread fallback. |
 | Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
 | Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code can register a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
@@ -143,7 +143,7 @@ The `KTimer` framework is the foundation for both CFS and RT scheduling. It buil
 red-black tree with `KTimerEntity` defined as:
 ```
 pub struct KTimerEntity {
-    deadline_at: u64,
+    expire_at: u64,
     node: RbNode,
     active: bool,
     pub miss_cnt: u32,
@@ -154,10 +154,10 @@ pub struct KTimerEntity {
 expiration. `KTimerEntity` also owns the `RtTiming` policy values used by both
 CFS and RT timers. For CFS, `period_ticks` is the CFS period and
 `relative_deadline_ticks` is the CFS execution slice.
-The embedded `KTimerEntity` is keyed by the next absolute deadline or release
+The embedded `KTimerEntity` is keyed by the next absolute expiration or release
 time. `SysTick` programming works differently for `CfsKTimer` and `RtKTimer`.
 When `CfsKTimer` switches to active, it programs `SysTick` with its execution slice.
-When `CfsKTimer` is switched out, its `deadline_at` is set to the end of the current CFS period and
+When `CfsKTimer` is switched out, its `expire_at` is set to the end of the current CFS period and
 the timer is marked `inactive`.
 
 `RtThread` timing is split into three meanings:
@@ -166,7 +166,7 @@ the timer is marked `inactive`.
 - `relative_deadline_ticks`: time from release to the job's scheduling deadline.
 - `budget_ticks`: runtime budget checked against `RtThread::runtime`.
 
-`deadline_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
+`expire_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
 dispatch expiry in `SysTick` interrupt handler, `yieldyi`, wait timer programming in `msleepyi`.
 
 SysTick stores a reload register value rather than a direct interval. A reload
@@ -174,9 +174,9 @@ value of `R` wraps after `R + 1` ticks, so an interval of `N` scheduler ticks is
 programmed as `N - 1`. The Cortex-M reload register is 24 bits wide and
 `rtsched` treats the writable reload range as `1..=0x00ff_ffff`. The raw
 conversion from ticks may produce reload value `0` for a one-tick interval, but
-scheduler programming writes `1` instead. When the next deadline is already due
+scheduler programming writes `1` instead. When the next timer expiration is already due
 or farther away than the hardware can represent, scheduler programming uses the
-nearest writable SysTick reload value. Long deadlines remain stored as absolute
+nearest writable SysTick reload value. Long expiration times remain stored as absolute
 `u64` tick values; each SysTick interrupt advances the timer queue by the
 programmed chunk and the scheduler reprograms the next chunk until the absolute
 deadline is reached.
@@ -230,7 +230,7 @@ Each `RtThread` has its own `RtKTimer` entry in the `KTimer` red-black tree (rbt
 at the left-most entry in the `KTimer` rbtree. Active RT timers are ordered by
 their absolute job deadline, computed from `relative_deadline_ticks`. When the
 current `RtThread` yields after finishing a job, it is set to `inactive` and
-reinserted with a new `deadline_at` based on the next `period_ticks` release. It
+reinserted with a new `expire_at` based on the next `period_ticks` release. It
 becomes active again when that release timer expires, with a fresh relative
 deadline.
 

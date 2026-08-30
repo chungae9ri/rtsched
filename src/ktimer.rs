@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
-//! Kernel timer queue keyed by ktimer deadline.
+//! Kernel timer queue keyed by ktimer expiration time.
 //!
 //! The queue is intrusive: each `KTimerEntity` embeds its own `RbNode`, so
 //! inserting ktimers does not allocate.
@@ -25,7 +25,7 @@ use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
 };
 
-const KTIMER_DEADLINE_NEVER: u64 = u64::MAX;
+const KTIMER_EXPIRE_NEVER: u64 = u64::MAX;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
@@ -88,7 +88,7 @@ impl RtTiming {
 
 #[repr(C)]
 pub(crate) struct KTimerEntity {
-    deadline_at: u64,
+    expire_at: u64,
     node: RbNode,
     active: bool,
     pub miss_cnt: u32,
@@ -97,13 +97,13 @@ pub(crate) struct KTimerEntity {
 
 impl KTimerEntity {
     #[allow(dead_code)]
-    pub const fn new(deadline_ticks: u32) -> Self {
-        Self::new_with_timing(deadline_ticks, RtTiming::from_period(deadline_ticks))
+    pub const fn new(expire_ticks: u32) -> Self {
+        Self::new_with_timing(expire_ticks, RtTiming::from_period(expire_ticks))
     }
 
-    pub const fn new_with_timing(deadline_ticks: u32, timing: RtTiming) -> Self {
+    pub const fn new_with_timing(expire_ticks: u32, timing: RtTiming) -> Self {
         Self {
-            deadline_at: deadline_ticks as u64,
+            expire_at: expire_ticks as u64,
             node: RbNode::new(),
             active: true,
             miss_cnt: 0,
@@ -112,43 +112,43 @@ impl KTimerEntity {
     }
 
     #[allow(dead_code)]
-    pub fn deadline(&self) -> u32 {
-        self.deadline_at.min(u64::from(u32::MAX)) as u32
+    pub fn expire(&self) -> u32 {
+        self.expire_at.min(u64::from(u32::MAX)) as u32
     }
 
-    pub fn set_deadline(&mut self, deadline: u32) {
-        self.deadline_at = u64::from(deadline);
+    pub fn set_expire(&mut self, expire: u32) {
+        self.expire_at = u64::from(expire);
     }
 
     #[allow(dead_code)]
-    pub fn deadline_at(&self) -> u64 {
-        self.deadline_at
+    pub fn expire_at(&self) -> u64 {
+        self.expire_at
     }
 
-    pub fn set_deadline_at(&mut self, deadline_at: u64) {
-        self.deadline_at = deadline_at;
+    pub fn set_expire_at(&mut self, expire_at: u64) {
+        self.expire_at = expire_at;
     }
 
-    pub fn set_deadline_after(&mut self, now_ticks: u64, ticks: u32) {
-        self.deadline_at = now_ticks.saturating_add(u64::from(ticks));
+    pub fn set_expire_after(&mut self, now_ticks: u64, ticks: u32) {
+        self.expire_at = now_ticks.saturating_add(u64::from(ticks));
     }
 
-    pub fn set_deadline_never(&mut self) {
-        self.deadline_at = KTIMER_DEADLINE_NEVER;
+    pub fn set_expire_never(&mut self) {
+        self.expire_at = KTIMER_EXPIRE_NEVER;
     }
 
     pub fn remaining_at(&self, now_ticks: u64) -> u32 {
-        if self.deadline_at == KTIMER_DEADLINE_NEVER {
+        if self.expire_at == KTIMER_EXPIRE_NEVER {
             return SCHEDULER_TIMER_RELOAD_MAX;
         }
 
-        self.deadline_at
+        self.expire_at
             .saturating_sub(now_ticks)
             .min(u64::from(SCHEDULER_TIMER_RELOAD_MAX)) as u32
     }
 
     pub fn is_expired_at(&self, now_ticks: u64) -> bool {
-        self.deadline_at <= now_ticks
+        self.expire_at <= now_ticks
     }
 
     pub fn reset_links(&mut self) {
@@ -248,7 +248,7 @@ impl WaitKTimer {
     pub const fn inactive() -> Self {
         Self {
             entity: KTimerEntity {
-                deadline_at: KTIMER_DEADLINE_NEVER,
+                expire_at: KTIMER_EXPIRE_NEVER,
                 node: RbNode::new(),
                 active: false,
                 miss_cnt: 0,
@@ -348,7 +348,7 @@ pub fn reload_from_ticks(ticks: u32) -> Option<u32> {
 ///
 /// Do not call this while timer entities or wait entities are queued, running,
 /// or otherwise visible to the scheduler. Reinitializing with live entities
-/// invalidates their intrusive links and loses the current timer deadline.
+/// invalidates their intrusive links and loses the current timer expiration.
 pub unsafe fn init_ktimer_queue() {
     critical_section(|| unsafe {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
@@ -375,9 +375,9 @@ unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
     unsafe {
         let wait_entity = (*WAIT_QUEUE.get()).first();
         if wait_entity.is_null() {
-            (*wait_ktimer_entity).set_deadline_never();
+            (*wait_ktimer_entity).set_expire_never();
         } else {
-            (*wait_ktimer_entity).set_deadline_at((*wait_entity).wake_at);
+            (*wait_ktimer_entity).set_expire_at((*wait_entity).wake_at);
         }
         (*wait_ktimer_entity).set_active(false);
     }
@@ -409,7 +409,7 @@ unsafe fn set_rt_active_deadline_after_runtime(
     runtime: u32,
 ) {
     unsafe {
-        (*entity).set_deadline_after(
+        (*entity).set_expire_after(
             now_ticks,
             rt_relative_deadline_ticks(entity).saturating_sub(runtime),
         );
@@ -422,13 +422,13 @@ unsafe fn set_rt_next_release_after_runtime(
     runtime: u32,
 ) {
     unsafe {
-        (*entity).set_deadline_after(now_ticks, rt_period_ticks(entity).saturating_sub(runtime));
+        (*entity).set_expire_after(now_ticks, rt_period_ticks(entity).saturating_sub(runtime));
     }
 }
 
 unsafe fn set_rt_next_deadline(entity: *mut KTimerEntity, now_ticks: u64) {
     unsafe {
-        (*entity).set_deadline_after(now_ticks, rt_relative_deadline_ticks(entity));
+        (*entity).set_expire_after(now_ticks, rt_relative_deadline_ticks(entity));
     }
 }
 
@@ -524,12 +524,12 @@ unsafe fn print_ktimer_statistics(
 ) {
     unsafe {
         crate::rtsched_println!(
-            "  {} name='{}' kind={} queued={} deadline_at={} remaining={} active={} misses={}",
+            "  {} name='{}' kind={} queued={} expire_at={} remaining={} active={} misses={}",
             marker,
             ktimer_name(entity),
             ktimer_kind_name(entity),
             yes_no(queued),
-            (*entity).deadline_at(),
+            (*entity).expire_at(),
             (*entity).remaining_at(queue.now_ticks()),
             yes_no((*entity).is_active()),
             (*entity).miss_cnt
@@ -706,7 +706,7 @@ fn print_rt_thread_statistics(
 
     unsafe {
         crate::rtsched_println!(
-            "{}{}: id={} name='{}' class=rt state={} runtime={} ktimer='{}' deadline_at={} remaining={} active={} misses={}",
+            "{}{}: id={} name='{}' class=rt state={} runtime={} ktimer='{}' expire_at={} remaining={} active={} misses={}",
             indent,
             label,
             thread_ctx.id,
@@ -714,7 +714,7 @@ fn print_rt_thread_statistics(
             thread_state_name(thread_ctx.state),
             thread.runtime(),
             ktimer_name(ktimer_entity),
-            (*ktimer_entity).deadline_at(),
+            (*ktimer_entity).expire_at(),
             (*ktimer_entity).remaining_at(now_ticks),
             yes_no((*ktimer_entity).is_active()),
             (*ktimer_entity).miss_cnt
@@ -852,7 +852,7 @@ unsafe fn normalize_next_ktimer(
             queue.remove(entity);
             if is_cfs_ktimer(entity) {
                 (*entity).miss_cnt = (*entity).miss_cnt.saturating_add(1);
-                (*entity).set_deadline_after(queue.now_ticks(), cfs_period_ticks(entity));
+                (*entity).set_expire_after(queue.now_ticks(), cfs_period_ticks(entity));
             } else {
                 let rt_thread_ctx = (*KTimerEntity::rt_ktimer(entity)).thread_ctx();
                 let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(rt_thread_ctx));
@@ -989,34 +989,34 @@ unsafe fn thread_scheduler_ktimer(thread: ThreadHandle) -> *mut KTimerEntity {
     }
 }
 
-pub(crate) unsafe fn thread_scheduler_deadline_at(thread: ThreadHandle) -> u64 {
+pub(crate) unsafe fn thread_scheduler_expire_at(thread: ThreadHandle) -> u64 {
     critical_section(|| unsafe {
         let entity = thread_scheduler_ktimer(thread);
         if entity.is_null() {
-            KTIMER_DEADLINE_NEVER
+            KTIMER_EXPIRE_NEVER
         } else {
-            (*entity).deadline_at()
+            (*entity).expire_at()
         }
     })
 }
 
-pub(crate) unsafe fn earliest_queued_scheduler_deadline_at() -> u64 {
+pub(crate) unsafe fn earliest_queued_scheduler_expire_at() -> u64 {
     critical_section(|| unsafe {
         let queue = &*KTIMER_QUEUE.get();
         let mut entity = queue.first();
 
         while !entity.is_null() {
             if !is_wait_ktimer(entity) {
-                return (*entity).deadline_at();
+                return (*entity).expire_at();
             }
             entity = queue.next(entity);
         }
 
-        KTIMER_DEADLINE_NEVER
+        KTIMER_EXPIRE_NEVER
     })
 }
 
-pub(crate) unsafe fn set_thread_scheduler_deadline_at(thread: ThreadHandle, deadline_at: u64) {
+pub(crate) unsafe fn set_thread_scheduler_expire_at(thread: ThreadHandle, expire_at: u64) {
     critical_section(|| unsafe {
         let entity = thread_scheduler_ktimer(thread);
         if entity.is_null() {
@@ -1030,7 +1030,7 @@ pub(crate) unsafe fn set_thread_scheduler_deadline_at(thread: ThreadHandle, dead
             queue.remove(entity);
         }
 
-        (*entity).set_deadline_at(deadline_at);
+        (*entity).set_expire_at(expire_at);
 
         if was_queued {
             (*entity).reset_links();
@@ -1050,7 +1050,7 @@ pub fn traverse_ktimer_queue() {
         crate::rtsched_println!("ktimer queue:");
         while !entity.is_null() {
             crate::rtsched_println!(
-                "{} ktimer's deadline={}, active={}",
+                "{} ktimer's remaining={}, active={}",
                 ktimer_name(entity),
                 (*entity).remaining_at(queue.now_ticks()),
                 (*entity).is_active()
@@ -1061,7 +1061,7 @@ pub fn traverse_ktimer_queue() {
 }
 
 /// Traverse the ktimer queue and invoke `f` for each ktimer with its name
-/// and deadline. This is similar to `traverse_ktimer_queue` but allows the
+/// and remaining ticks. This is similar to `traverse_ktimer_queue` but allows the
 /// caller to handle formatting/output (for example, writing to UART).
 pub fn traverse_ktimer_queue_fn<F>(mut f: F)
 where
@@ -1211,7 +1211,7 @@ unsafe fn yield_ktimer_in_queue(
         queue.remove(entity);
 
         if is_cfs_ktimer(entity) {
-            (*entity).set_deadline_after(
+            (*entity).set_expire_after(
                 queue.now_ticks().saturating_add(u64::from(elapsed)),
                 cfs_period_ticks(entity).saturating_sub(elapsed),
             );
@@ -1274,7 +1274,7 @@ unsafe fn scheduler_timer_reload_for_entity(
             programmable_reload_from_ticks(ticks)
         } else {
             let raw_reload = (*entity)
-                .deadline_at
+                .expire_at
                 .saturating_sub(queue.now_ticks())
                 .saturating_sub(1)
                 .min(u64::from(SCHEDULER_TIMER_RELOAD_MAX)) as u32;
@@ -1336,7 +1336,7 @@ unsafe impl RBTreeNode for KTimerEntity {
 
     unsafe fn cmp(a: *const Self, b: *const Self) -> core::cmp::Ordering {
         unsafe {
-            match (*a).deadline_at.cmp(&(*b).deadline_at) {
+            match (*a).expire_at.cmp(&(*b).expire_at) {
                 core::cmp::Ordering::Equal => (a as usize).cmp(&(b as usize)),
                 other => other,
             }
@@ -1446,14 +1446,14 @@ impl KTimerQueue {
                     self.insert(expired);
                 } else if is_cfs_ktimer(expired) {
                     if (*expired).is_active() {
-                        (*expired).set_deadline_after(
+                        (*expired).set_expire_after(
                             self.now_ticks,
                             cfs_period_ticks(expired).saturating_sub(elapsed),
                         );
                         (*expired).set_active(false);
                         self.insert(expired);
                     } else {
-                        (*expired).set_deadline_after(self.now_ticks, cfs_period_ticks(expired));
+                        (*expired).set_expire_after(self.now_ticks, cfs_period_ticks(expired));
                         (*expired).set_active(true);
                         self.insert(expired);
                     }
@@ -1626,7 +1626,7 @@ mod tests {
 
         while !entity.is_null() {
             unsafe {
-                deadlines.push((*entity).deadline_at());
+                deadlines.push((*entity).expire_at());
             }
             entity = queue.next(entity);
         }
@@ -1655,7 +1655,7 @@ mod tests {
         while !entity.is_null() {
             unsafe {
                 if (*entity).is_active() {
-                    deadlines.push((*entity).deadline_at());
+                    deadlines.push((*entity).expire_at());
                 }
             }
             entity = queue.next(entity);
@@ -1716,8 +1716,8 @@ mod tests {
         assert_eq!(queue.next_deadline(), Some(5));
         assert_eq!(queue.next_reload(), Some(4));
         unsafe {
-            assert_eq!((*queue.first()).deadline_at(), 5);
-            assert_eq!((*queue.last()).deadline_at(), 30);
+            assert_eq!((*queue.first()).expire_at(), 5);
+            assert_eq!((*queue.last()).expire_at(), 30);
         }
     }
 
@@ -1763,9 +1763,9 @@ mod tests {
         queue.advance_time(5);
 
         assert_eq!(queue.now_ticks(), 5);
-        assert_eq!(short.deadline_at(), 3);
-        assert_eq!(long.deadline_at(), 20);
-        assert_eq!(parked.entity.deadline_at(), KTIMER_DEADLINE_NEVER);
+        assert_eq!(short.expire_at(), 3);
+        assert_eq!(long.expire_at(), 20);
+        assert_eq!(parked.entity.expire_at(), KTIMER_EXPIRE_NEVER);
         assert_eq!(short.remaining_at(queue.now_ticks()), 0);
         assert_eq!(long.remaining_at(queue.now_ticks()), 15);
         assert_eq!(
@@ -1795,7 +1795,7 @@ mod tests {
     fn next_reload_clamps_far_deadlines_to_maximum_reload() {
         let mut queue = KTimerQueue::new();
         let mut far = KTimerEntity::new(1);
-        far.set_deadline_at(u64::from(SCHEDULER_TIMER_RELOAD_MAX) + 42);
+        far.set_expire_at(u64::from(SCHEDULER_TIMER_RELOAD_MAX) + 42);
 
         unsafe {
             queue.insert(&mut far);
@@ -1817,7 +1817,7 @@ mod tests {
             let cfs = ptr::addr_of_mut!(CFS_KTIMER.entity);
 
             queue.remove(cfs);
-            (*cfs).set_deadline_at(5);
+            (*cfs).set_expire_at(5);
             (*cfs).reset_links();
             queue.insert(cfs);
 
@@ -1837,7 +1837,7 @@ mod tests {
 
         unsafe {
             ktimer.init_rt_ktimer(&mut rt.thread);
-            ktimer.entity.set_deadline_at(long_deadline);
+            ktimer.entity.set_expire_at(long_deadline);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -1847,7 +1847,7 @@ mod tests {
         let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
         assert!(ptr::eq(next, ktimer.entity_mut()));
         assert_eq!(queue.now_ticks(), u64::from(max_chunk_ticks));
-        assert_eq!(ktimer.entity.deadline_at(), long_deadline);
+        assert_eq!(ktimer.entity.expire_at(), long_deadline);
         assert_eq!(ktimer.entity.miss_cnt, 0);
         assert_eq!(queue.next_reload(), Some(SCHEDULER_TIMER_RELOAD_MAX));
 
@@ -1855,7 +1855,7 @@ mod tests {
         let next = unsafe { queue.dispatch_expired(max_chunk_ticks) };
         assert!(ptr::eq(next, ktimer.entity_mut()));
         assert_eq!(queue.now_ticks(), u64::from(max_chunk_ticks) * 2);
-        assert_eq!(ktimer.entity.deadline_at(), long_deadline);
+        assert_eq!(ktimer.entity.expire_at(), long_deadline);
         assert_eq!(ktimer.entity.miss_cnt, 0);
         assert_eq!(queue.next_reload(), Some(4));
 
@@ -1865,7 +1865,7 @@ mod tests {
         assert!(ptr::eq(next, ktimer.entity_mut()));
         assert_eq!(queue.now_ticks(), long_deadline);
         assert_eq!(ktimer.entity.miss_cnt, 0);
-        assert_eq!(ktimer.entity.deadline_at(), long_deadline + 50);
+        assert_eq!(ktimer.entity.expire_at(), long_deadline + 50);
     }
 
     #[test]
@@ -1993,7 +1993,7 @@ mod tests {
 
         let mut popped = Vec::new();
         while let Some(timer) = unsafe { queue.pop_first() } {
-            popped.push(timer.deadline_at());
+            popped.push(timer.expire_at());
             assert!(!timer.is_linked());
         }
 
@@ -2013,7 +2013,7 @@ mod tests {
         assert_eq!(ktimer.budget_ticks(), 20);
         assert_eq!(ktimer.timing(), RtTiming::new(100, 40, 20));
         assert_eq!(ktimer.entity.timing(), RtTiming::new(100, 40, 20));
-        assert_eq!(ktimer.entity.deadline_at(), 40);
+        assert_eq!(ktimer.entity.expire_at(), 40);
     }
 
     #[test]
@@ -2036,7 +2036,7 @@ mod tests {
 
         assert_eq!(rt.runtime, 20);
         assert!(!ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.expire_at(), 100);
         assert_eq!(queue.now_ticks(), 20);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 80);
     }
@@ -2061,7 +2061,7 @@ mod tests {
 
         assert_eq!(rt.runtime, 0);
         assert!(!ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 60);
+        assert_eq!(ktimer.entity.expire_at(), 60);
         assert_eq!(queue.now_ticks(), 15);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
     }
@@ -2087,7 +2087,7 @@ mod tests {
 
         assert_eq!(rt.runtime, 15);
         assert!(!ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.expire_at(), 100);
         assert_eq!(queue.now_ticks(), 15);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 85);
         assert_eq!(ktimer.entity.miss_cnt, 0);
@@ -2115,7 +2115,7 @@ mod tests {
         assert_eq!(rt.runtime, 15);
         assert_eq!(ktimer.entity.miss_cnt, 1);
         assert!(!ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.expire_at(), 100);
     }
 
     #[test]
@@ -2144,7 +2144,7 @@ mod tests {
         assert!(rt.thread.state == ThreadState::Ready);
         assert_eq!(rt.runtime, 50);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.expire_at(), 100);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 50);
         assert!(ptr::eq(queue.first_active(), ktimer.entity_mut()));
     }
@@ -2175,7 +2175,7 @@ mod tests {
 
         assert_eq!(rt.runtime, 50);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 60);
+        assert_eq!(ktimer.entity.expire_at(), 60);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 10);
     }
 
@@ -2227,7 +2227,7 @@ mod tests {
         unsafe {
             ktimer.init_rt_ktimer(&mut rt.thread);
             rt.runtime = 55;
-            ktimer.entity.set_deadline_at(10);
+            ktimer.entity.set_expire_at(10);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -2254,7 +2254,7 @@ mod tests {
         assert_eq!(ktimer.entity.miss_cnt, 1);
         assert_eq!(rt.runtime, 55);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 10);
+        assert_eq!(ktimer.entity.expire_at(), 10);
     }
 
     #[test]
@@ -2269,7 +2269,7 @@ mod tests {
         unsafe {
             ktimer.init_rt_ktimer(&mut rt.thread);
             rt.runtime = 45;
-            ktimer.entity.set_deadline_at(100);
+            ktimer.entity.set_expire_at(100);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -2282,7 +2282,7 @@ mod tests {
         assert_eq!(ktimer.entity.miss_cnt, 1);
         assert_eq!(rt.runtime, 45);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 100);
+        assert_eq!(ktimer.entity.expire_at(), 100);
     }
 
     #[test]
@@ -2296,7 +2296,7 @@ mod tests {
         unsafe {
             ktimer.init_rt_ktimer(&mut rt.thread);
             rt.runtime = 50;
-            ktimer.entity.set_deadline_at(10);
+            ktimer.entity.set_expire_at(10);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -2307,7 +2307,7 @@ mod tests {
         assert_eq!(ktimer.entity.miss_cnt, 0);
         assert_eq!(rt.runtime, 0);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 60);
+        assert_eq!(ktimer.entity.expire_at(), 60);
     }
 
     #[test]
@@ -2322,7 +2322,7 @@ mod tests {
             ktimer.init_rt_ktimer(&mut rt.thread);
             rt.runtime = 30;
             ktimer.entity.set_active(false);
-            ktimer.entity.set_deadline_at(10);
+            ktimer.entity.set_expire_at(10);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -2333,7 +2333,7 @@ mod tests {
         assert_eq!(ktimer.entity.miss_cnt, 0);
         assert_eq!(rt.runtime, 0);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 60);
+        assert_eq!(ktimer.entity.expire_at(), 60);
     }
 
     #[test]
@@ -2349,7 +2349,7 @@ mod tests {
             ktimer.init_rt_ktimer(&mut rt.thread);
             rt.runtime = 30;
             ktimer.entity.set_active(false);
-            ktimer.entity.set_deadline_at(100);
+            ktimer.entity.set_expire_at(100);
             queue.insert(ktimer.entity_mut());
         }
 
@@ -2360,6 +2360,6 @@ mod tests {
         assert_eq!(ktimer.entity.miss_cnt, 0);
         assert_eq!(rt.runtime, 0);
         assert!(ktimer.entity.is_active());
-        assert_eq!(ktimer.entity.deadline_at(), 140);
+        assert_eq!(ktimer.entity.expire_at(), 140);
     }
 }
