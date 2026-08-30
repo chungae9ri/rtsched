@@ -60,7 +60,7 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
         IDLE_THREAD_CTX = ptr::null_mut();
         CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks, "cfs");
         let cfs_ktimer = (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut();
-        (*cfs_ktimer).set_deadline(exec_ticks);
+        (*cfs_ktimer).set_expire(exec_ticks);
         enqueue_ktimer(cfs_ktimer);
     }
 }
@@ -436,7 +436,7 @@ mod tests {
             let cfs = ptr::addr_of!(CFS_KTIMER);
             let entity = ptr::addr_of!((*cfs).entity);
             assert_eq!((*cfs).period_ticks(), 100);
-            assert_eq!((*entity).deadline(), 25);
+            assert_eq!((*entity).expire(), 25);
             assert_eq!((*cfs).execution_ticks(), 25);
             assert!((*entity).is_active());
         }
