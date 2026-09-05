@@ -103,8 +103,10 @@ pub use sync::{
 
 pub use trace::{
     SchedIsrTiming, TraceCounters, TraceEvent, TraceFn, TraceThread, clear_trace_fn,
-    mark_sched_tick_to_pendsv_start, reset_sched_tick_to_pendsv_timing, reset_trace_counters,
-    sched_tick_to_pendsv_timing, set_trace_fn, trace_counters,
+    mark_sched_tick_to_pendsv_start, reset_sched_tick_to_pendsv_max_ticks,
+    reset_sched_tick_to_pendsv_min_max_ticks, reset_sched_tick_to_pendsv_min_ticks,
+    reset_sched_tick_to_pendsv_timing, reset_trace_counters, sched_tick_to_pendsv_timing,
+    set_trace_fn, trace_counters,
 };
 
 pub use waitq::{WaitQueueError, traverse_wait_queue_fn};

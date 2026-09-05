@@ -10,6 +10,8 @@ use core::cell::UnsafeCell;
 use core::cmp::Ordering;
 use core::mem::offset_of;
 use core::ptr;
+#[cfg(test)]
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
 use crate::arch::platform;
 use crate::arch::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_MIN};
@@ -30,6 +32,11 @@ static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
 pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::inactive();
+
+#[cfg(test)]
+static TEST_ELAPSED_TICKS_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static TEST_ELAPSED_TICKS_OVERRIDE: AtomicU32 = AtomicU32::new(0);
 
 struct GlobalKTimerQueue {
     queue: UnsafeCell<KTimerQueue>,
@@ -845,7 +852,7 @@ unsafe fn normalize_next_ktimer(
 ) -> *mut KTimerEntity {
     unsafe {
         if entity.is_null() {
-            entity = activate_cfs_ktimer();
+            entity = activate_cfs_ktimer(queue);
         }
 
         if !entity.is_null() && (*entity).is_expired_at(queue.now_ticks()) {
@@ -867,7 +874,7 @@ unsafe fn normalize_next_ktimer(
 
             entity = queue.first_active();
             if entity.is_null() {
-                entity = activate_cfs_ktimer();
+                entity = activate_cfs_ktimer(queue);
             }
         }
 
@@ -939,10 +946,29 @@ pub fn next_ktimer_reload() -> Option<u32> {
 }
 
 pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
+    #[cfg(test)]
+    {
+        if TEST_ELAPSED_TICKS_OVERRIDE_SET.load(AtomicOrdering::Relaxed) {
+            return TEST_ELAPSED_TICKS_OVERRIDE.load(AtomicOrdering::Relaxed);
+        }
+    }
+
     scheduler_timer_reload()
         .or_else(next_ktimer_reload)
         .map(|reload| reload.saturating_add(1))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn set_elapsed_ticks_since_last_interrupt_for_test(elapsed: u32) {
+    TEST_ELAPSED_TICKS_OVERRIDE.store(elapsed, AtomicOrdering::Relaxed);
+    TEST_ELAPSED_TICKS_OVERRIDE_SET.store(true, AtomicOrdering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn clear_elapsed_ticks_since_last_interrupt_for_test() {
+    TEST_ELAPSED_TICKS_OVERRIDE_SET.store(false, AtomicOrdering::Relaxed);
+    TEST_ELAPSED_TICKS_OVERRIDE.store(0, AtomicOrdering::Relaxed);
 }
 
 pub(crate) fn elapsed_ticks_since_current_reload() -> u32 {
@@ -1176,11 +1202,14 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-unsafe fn activate_cfs_ktimer() -> *mut KTimerEntity {
+unsafe fn activate_cfs_ktimer(queue: &mut KTimerQueue) -> *mut KTimerEntity {
     let cfs = cfs_ktimer();
     if !cfs.is_null() {
         unsafe {
             (*cfs).set_active(true);
+            if queue.contains(cfs.cast_const()) {
+                queue.update_first_active_cache_with(cfs);
+            }
         }
     }
     cfs
@@ -1238,7 +1267,7 @@ unsafe fn yield_ktimer_in_queue(
         queue.insert(entity);
         let next = queue.first_active();
         if next.is_null() {
-            activate_cfs_ktimer()
+            activate_cfs_ktimer(queue)
         } else {
             next
         }
@@ -1347,6 +1376,7 @@ unsafe impl RBTreeNode for KTimerEntity {
 pub struct KTimerQueue {
     tree: RBTree<KTimerEntity>,
     left_most: *mut RbNode,
+    first_active: *mut RbNode,
     now_ticks: u64,
 }
 
@@ -1355,6 +1385,7 @@ impl KTimerQueue {
         Self {
             tree: RBTree::new(),
             left_most: ptr::null_mut(),
+            first_active: ptr::null_mut(),
             now_ticks: 0,
         }
     }
@@ -1376,6 +1407,10 @@ impl KTimerQueue {
 
     pub fn first(&self) -> *mut KTimerEntity {
         <KTimerEntity as RBTreeNode>::entity_of(self.left_most)
+    }
+
+    pub fn first_active(&self) -> *mut KTimerEntity {
+        <KTimerEntity as RBTreeNode>::entity_of(self.first_active)
     }
 
     #[allow(dead_code)]
@@ -1429,10 +1464,11 @@ impl KTimerQueue {
     pub unsafe fn dispatch_expired(&mut self, elapsed: u32) -> *mut KTimerEntity {
         unsafe {
             loop {
-                let (expired, first_active) = self.first_and_first_active();
+                let expired = self.first();
+                let first_active = self.first_active();
                 if expired.is_null() || !(*expired).is_expired_at(self.now_ticks) {
                     return if first_active.is_null() {
-                        activate_cfs_ktimer()
+                        activate_cfs_ktimer(self)
                     } else {
                         first_active
                     };
@@ -1493,6 +1529,7 @@ impl KTimerQueue {
             {
                 self.left_most = <KTimerEntity as RBTreeNode>::node(entity);
             }
+            self.update_first_active_cache_with(entity);
         }
     }
 
@@ -1515,10 +1552,23 @@ impl KTimerQueue {
             } else {
                 ptr::null_mut()
             };
+            let removing_first_active = !entity.is_null()
+                && ptr::eq(
+                    <KTimerEntity as RBTreeNode>::node(entity).cast_const(),
+                    self.first_active.cast_const(),
+                );
+            let next_first_active = if removing_first_active {
+                <KTimerEntity as RBTreeNode>::node(self.next_active_after(entity))
+            } else {
+                ptr::null_mut()
+            };
 
             let removed = self.tree.remove(entity);
             if removing_left_most {
                 self.left_most = next_left_most;
+            }
+            if removing_first_active {
+                self.first_active = next_first_active;
             }
 
             removed
@@ -1546,22 +1596,33 @@ impl KTimerQueue {
         }
     }
 
-    fn first_and_first_active(&self) -> (*mut KTimerEntity, *mut KTimerEntity) {
-        let first = self.first();
-        let mut entity = first;
-
-        while !entity.is_null() {
-            if unsafe { (*entity).is_active() } {
-                return (first, entity);
+    unsafe fn update_first_active_cache_with(&mut self, entity: *mut KTimerEntity) {
+        unsafe {
+            if !(*entity).is_active() {
+                return;
             }
-            entity = self.next(entity);
+            if self.first_active.is_null()
+                || <KTimerEntity as RBTreeNode>::cmp(
+                    entity.cast_const(),
+                    <KTimerEntity as RBTreeNode>::entity_of_const(self.first_active),
+                ) == Ordering::Less
+            {
+                self.first_active = <KTimerEntity as RBTreeNode>::node(entity);
+            }
         }
-
-        (first, ptr::null_mut())
     }
 
-    pub fn first_active(&self) -> *mut KTimerEntity {
-        self.first_and_first_active().1
+    unsafe fn next_active_after(&self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
+        unsafe {
+            let mut next = self.tree.next(entity);
+            while !next.is_null() {
+                if (*next).is_active() {
+                    return next;
+                }
+                next = self.tree.next(next);
+            }
+            ptr::null_mut()
+        }
     }
 }
 
@@ -1943,36 +2004,112 @@ mod tests {
         let mut middle = KTimerEntity::new(20);
 
         assert!(queue.left_most.is_null());
+        assert!(queue.first_active.is_null());
 
         unsafe {
             queue.insert(&mut late);
         }
         assert!(ptr::eq(queue.first(), &late));
+        assert!(ptr::eq(queue.first_active(), &late));
 
         unsafe {
             queue.insert(&mut early);
         }
         assert!(ptr::eq(queue.first(), &early));
+        assert!(ptr::eq(queue.first_active(), &early));
 
         unsafe {
             queue.insert(&mut middle);
         }
         assert!(ptr::eq(queue.first(), &early));
+        assert!(ptr::eq(queue.first_active(), &early));
 
         unsafe {
             queue.remove(&mut early);
         }
         assert!(ptr::eq(queue.first(), &middle));
+        assert!(ptr::eq(queue.first_active(), &middle));
 
         let popped = unsafe { queue.pop_first() }.unwrap() as *mut KTimerEntity;
         assert!(ptr::eq(popped, ptr::addr_of_mut!(middle)));
         assert!(ptr::eq(queue.first(), &late));
+        assert!(ptr::eq(queue.first_active(), &late));
 
         unsafe {
             queue.remove(&mut late);
         }
         assert!(queue.left_most.is_null());
+        assert!(queue.first_active.is_null());
         assert!(queue.first().is_null());
+        assert!(queue.first_active().is_null());
+    }
+
+    #[test]
+    fn first_active_cache_tracks_inactive_frontier_mutations() {
+        let mut queue = KTimerQueue::new();
+        let mut inactive_early = KTimerEntity::new(5);
+        let mut active_middle = KTimerEntity::new(10);
+        let mut inactive_late = KTimerEntity::new(20);
+        let mut active_late = KTimerEntity::new(30);
+
+        inactive_early.set_active(false);
+        inactive_late.set_active(false);
+
+        unsafe {
+            queue.insert(&mut inactive_early);
+        }
+        assert!(ptr::eq(queue.first(), &inactive_early));
+        assert!(queue.first_active().is_null());
+
+        unsafe {
+            queue.insert(&mut active_late);
+        }
+        assert!(ptr::eq(queue.first_active(), &active_late));
+
+        unsafe {
+            queue.insert(&mut active_middle);
+        }
+        assert!(ptr::eq(queue.first_active(), &active_middle));
+
+        unsafe {
+            queue.insert(&mut inactive_late);
+        }
+        assert!(ptr::eq(queue.first_active(), &active_middle));
+
+        unsafe {
+            queue.remove(&mut active_middle);
+        }
+        assert!(ptr::eq(queue.first_active(), &active_late));
+
+        unsafe {
+            queue.remove(&mut active_late);
+        }
+        assert!(queue.first_active().is_null());
+        assert!(ptr::eq(queue.first(), &inactive_early));
+    }
+
+    #[test]
+    fn activate_cfs_ktimer_updates_first_active_cache() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        unsafe {
+            init_ktimer_queue();
+            crate::sched::init_cfs(100, 25);
+
+            let queue = &mut *KTIMER_QUEUE.get();
+            let cfs = cfs_ktimer();
+            queue.remove(cfs);
+            (*cfs).set_active(false);
+            (*cfs).reset_links();
+            queue.insert(cfs);
+
+            assert!(queue.first_active().is_null());
+
+            let activated = activate_cfs_ktimer(queue);
+
+            assert!(ptr::eq(activated, cfs));
+            assert!(ptr::eq(queue.first_active(), cfs));
+        }
     }
 
     #[test]

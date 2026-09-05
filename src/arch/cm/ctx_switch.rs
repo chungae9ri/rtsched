@@ -154,6 +154,15 @@ mod imp {
         "cmp r2, r3",
         "it lo",
         "strlo r3, [r1]",
+        "ldr r1, =SCHED_TICK_TO_PENDSV_MIN_TICKS",
+        "ldr r2, [r1]",
+        "cbz r2, 2f",
+        "cmp r3, r2",
+        "it lo",
+        "strlo r3, [r1]",
+        "b 1f",
+        "2:",
+        "str r3, [r1]",
         "1:",
     );
 

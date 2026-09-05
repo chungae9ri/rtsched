@@ -171,19 +171,8 @@ unsafe fn switch_to_idle_thread_with_current_requeued() {
 extern "C" fn schedule() {
     unsafe {
         let next_ktimer = next_ktimer();
-        if next_ktimer.is_null() {
-            switch_to_idle_thread_with_current_requeued();
-            program_next_scheduler_timer();
-            return;
-        }
+        let elapsed = elapsed_ticks_since_last_interrupt();
 
-        schedule_next(next_ktimer, elapsed_ticks_since_last_interrupt());
-        program_next_scheduler_timer();
-    }
-}
-
-unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
-    unsafe {
         // The scheduler logic is as follows:
         // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
         //   ticks and its inverse-numeric priority. Lower numeric priority values are
@@ -275,6 +264,8 @@ unsafe fn schedule_next(next_ktimer: *mut KTimerEntity, elapsed: u32) {
             CURRENT_THREAD_CTX = next_thread_handle.as_ptr();
             CURRENT_THREAD_IS_CFS = false;
         }
+
+        program_next_scheduler_timer();
     }
 }
 
@@ -298,8 +289,25 @@ pub fn handle_sched_tick() {
     let elapsed = elapsed_ticks_since_last_interrupt();
 
     let next_ktimer = unsafe {
+        #[cfg(feature = "sched-isr-timing")]
+        let ktimer_start_cycle = crate::arch::platform::dwt_cycle_count();
+
         advance_ktimers(elapsed);
+
+        #[cfg(feature = "sched-isr-timing")]
+        let after_advance_cycle = crate::arch::platform::dwt_cycle_count();
+
         let next_ktimer = dispatch_expired_ktimer(elapsed);
+
+        #[cfg(feature = "sched-isr-timing")]
+        {
+            let after_dispatch_cycle = crate::arch::platform::dwt_cycle_count();
+            crate::trace::record_sched_tick_ktimer_timing(
+                after_advance_cycle.wrapping_sub(ktimer_start_cycle),
+                after_dispatch_cycle.wrapping_sub(after_advance_cycle),
+            );
+        }
+
         next_ktimer
     };
 
@@ -307,17 +315,18 @@ pub fn handle_sched_tick() {
         update_next_ktimer(next_ktimer);
     }
 
-    if !next_ktimer.is_null() {
-        crate::trace::arm_sched_tick_to_pendsv_sample();
-        request_context_switch();
-    }
+    crate::trace::arm_sched_tick_to_pendsv_sample();
+    request_context_switch();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TEST_LOCK;
-    use crate::ktimer::{RtKTimer, init_ktimer_queue};
+    use crate::ktimer::{
+        RtKTimer, clear_elapsed_ticks_since_last_interrupt_for_test, init_ktimer_queue,
+        set_elapsed_ticks_since_last_interrupt_for_test,
+    };
     use crate::thread::{CfsThread, RtThread, ThreadHandle};
     use crate::waitq::WaitEntity;
 
@@ -363,12 +372,31 @@ mod tests {
 
     unsafe fn reset_sched_state() -> *mut KTimerEntity {
         unsafe {
+            init_ktimer_queue();
             init_cfs_rq();
             CURRENT_THREAD_CTX = ptr::null_mut();
             CURRENT_THREAD_IS_CFS = false;
             IDLE_THREAD_CTX = ptr::null_mut();
             CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
             (*ptr::addr_of_mut!(CFS_KTIMER)).entity_mut()
+        }
+    }
+
+    struct ElapsedTicksOverrideGuard;
+
+    impl Drop for ElapsedTicksOverrideGuard {
+        fn drop(&mut self) {
+            clear_elapsed_ticks_since_last_interrupt_for_test();
+        }
+    }
+
+    unsafe fn schedule_for_test(next_ktimer: *mut KTimerEntity, elapsed: u32) {
+        unsafe {
+            update_next_ktimer(next_ktimer);
+            set_elapsed_ticks_since_last_interrupt_for_test(elapsed);
+            let _guard = ElapsedTicksOverrideGuard;
+
+            schedule();
         }
     }
 
@@ -456,7 +484,7 @@ mod tests {
             queue_cfs_thread(&mut queued.thread);
             *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
 
-            schedule_next(cfs_ktimer, 12);
+            schedule_for_test(cfs_ktimer, 12);
         }
 
         assert_eq!(current.sched_entity.sched_tick_cnt(), 12);
@@ -478,7 +506,7 @@ mod tests {
             queue_cfs_thread(&mut queued.thread);
             *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
 
-            schedule_next(cfs_ktimer, 10);
+            schedule_for_test(cfs_ktimer, 10);
         }
 
         assert_eq!(current.sched_entity.vruntime(), 15);
@@ -512,7 +540,7 @@ mod tests {
             queue_cfs_thread(&mut queued.thread);
             *CFS_RUN_QUEUE.priority_sum() += current.sched_entity.priority;
 
-            schedule_next(cfs_ktimer, 2);
+            schedule_for_test(cfs_ktimer, 2);
         }
 
         assert_eq!(current.sched_entity.vruntime(), 1);
@@ -548,7 +576,7 @@ mod tests {
             queue_cfs_thread(&mut first.thread);
             queue_cfs_thread(&mut second.thread);
 
-            schedule_next(cfs_ktimer, 0);
+            schedule_for_test(cfs_ktimer, 0);
         }
 
         assert!(rt.thread.state == ThreadState::Ready);
@@ -579,7 +607,7 @@ mod tests {
             CURRENT_THREAD_IS_CFS = true;
             *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
 
-            schedule_next(rt_ktimer.entity_mut(), 0);
+            schedule_for_test(rt_ktimer.entity_mut(), 0);
         }
 
         assert!(current.thread.state == ThreadState::Ready);
@@ -632,7 +660,7 @@ mod tests {
             CURRENT_THREAD_CTX = &mut rt.thread;
             CURRENT_THREAD_IS_CFS = false;
 
-            schedule_next(cfs_ktimer, 0);
+            schedule_for_test(cfs_ktimer, 0);
         }
 
         assert!(idle.thread.state == ThreadState::Running);
@@ -659,7 +687,7 @@ mod tests {
             CURRENT_THREAD_IS_CFS = true;
             *CFS_RUN_QUEUE.priority_sum() = current.sched_entity.priority;
 
-            schedule_next(cfs_ktimer, 10);
+            schedule_for_test(cfs_ktimer, 10);
         }
 
         assert!(idle.thread.state == ThreadState::Running);
@@ -691,7 +719,7 @@ mod tests {
             CURRENT_THREAD_IS_CFS = false;
             queue_cfs_thread(&mut queued.thread);
 
-            schedule_next(cfs_ktimer, 0);
+            schedule_for_test(cfs_ktimer, 0);
         }
 
         assert!(idle.thread.state == ThreadState::Running);
@@ -722,7 +750,7 @@ mod tests {
             CURRENT_THREAD_IS_CFS = true;
             queue_cfs_thread(&mut queued.thread);
 
-            schedule_next(cfs_ktimer, 0);
+            schedule_for_test(cfs_ktimer, 0);
         }
 
         assert!(idle.thread.state == ThreadState::Ready);
@@ -751,7 +779,7 @@ mod tests {
             CURRENT_THREAD_CTX = &mut idle.thread;
             CURRENT_THREAD_IS_CFS = true;
 
-            schedule_next(rt_ktimer.entity_mut(), 0);
+            schedule_for_test(rt_ktimer.entity_mut(), 0);
         }
 
         assert!(idle.thread.state == ThreadState::Ready);
