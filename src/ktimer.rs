@@ -867,14 +867,9 @@ unsafe fn reinsert_ktimer(entity: *mut KTimerEntity) {
     });
 }
 
-unsafe fn normalize_next_ktimer(
-    queue: &mut KTimerQueue,
-    mut entity: *mut KTimerEntity,
-) -> *mut KTimerEntity {
+unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
     unsafe {
-        if entity.is_null() {
-            entity = activate_cfs_ktimer(queue);
-        }
+        let mut entity = queue.first_active();
 
         if !entity.is_null() && (*entity).is_expired_at(queue.now_ticks()) {
             queue.remove(entity);
@@ -894,18 +889,9 @@ unsafe fn normalize_next_ktimer(
             queue.insert(entity);
 
             entity = queue.first_active();
-            if entity.is_null() {
-                entity = activate_cfs_ktimer(queue);
-            }
         }
 
-        entity
-    }
-}
-
-unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
-    unsafe {
-        NEXT_KTIMER = normalize_next_ktimer(queue, queue.first_active());
+        NEXT_KTIMER = entity;
     }
 }
 
@@ -1223,20 +1209,6 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
-unsafe fn activate_cfs_ktimer(queue: &mut KTimerQueue) -> *mut KTimerEntity {
-    let cfs = cfs_ktimer();
-    if cfs.is_null() || !queue.contains(cfs.cast_const()) {
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        (*cfs).set_active(true);
-        queue.update_first_active_cache_with(cfs);
-    }
-
-    cfs
-}
-
 pub(crate) unsafe fn yield_ktimer(
     entity: *mut KTimerEntity,
     elapsed: u32,
@@ -1287,12 +1259,7 @@ unsafe fn yield_ktimer_in_queue(
         (*entity).set_active(false);
         queue.advance_time(elapsed);
         queue.insert(entity);
-        let next = queue.first_active();
-        if next.is_null() {
-            activate_cfs_ktimer(queue)
-        } else {
-            next
-        }
+        queue.first_active()
     }
 }
 
@@ -1490,7 +1457,7 @@ impl KTimerQueue {
                 let first_active = self.first_active();
                 if expired.is_null() || !(*expired).is_expired_at(self.now_ticks) {
                     return if first_active.is_null() {
-                        activate_cfs_ktimer(self)
+                        ptr::null_mut()
                     } else {
                         first_active
                     };
@@ -2111,7 +2078,7 @@ mod tests {
     }
 
     #[test]
-    fn activate_cfs_ktimer_updates_first_active_cache() {
+    fn refresh_next_ktimer_leaves_inactive_cfs_timer_inactive() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         unsafe {
@@ -2125,32 +2092,35 @@ mod tests {
             (*cfs).reset_links();
             queue.insert(cfs);
 
+            refresh_next_ktimer(queue);
+
+            assert!(next_ktimer().is_null());
+            assert!(!(*cfs).is_active());
             assert!(queue.first_active().is_null());
-
-            let activated = activate_cfs_ktimer(queue);
-
-            assert!(ptr::eq(activated, cfs));
-            assert!(ptr::eq(queue.first_active(), cfs));
+            assert!(queue.contains(cfs.cast_const()));
         }
     }
 
     #[test]
-    fn activate_cfs_ktimer_returns_null_when_cfs_timer_is_not_queued() {
+    fn dispatch_expired_returns_null_when_no_timer_is_active() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         unsafe {
             init_ktimer_queue();
-            CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
+            crate::sched::init_cfs(100, 25);
 
             let queue = &mut *KTIMER_QUEUE.get();
             let cfs = cfs_ktimer();
+            queue.remove(cfs);
+            (*cfs).set_expire_at(100);
             (*cfs).set_active(false);
+            (*cfs).reset_links();
+            queue.insert(cfs);
 
-            let activated = activate_cfs_ktimer(queue);
+            let next = queue.dispatch_expired(0);
 
-            assert!(activated.is_null());
+            assert!(next.is_null());
             assert!(!(*cfs).is_active());
-            assert!(!queue.contains(cfs.cast_const()));
             assert!(queue.first_active().is_null());
         }
     }
@@ -2247,7 +2217,7 @@ mod tests {
     }
 
     #[test]
-    fn rt_yield_without_active_timers_and_without_cfs_timer_returns_null() {
+    fn rt_yield_without_active_timers_returns_null() {
         let _guard = TEST_LOCK.lock().unwrap();
 
         let mut queue = KTimerQueue::new();
@@ -2256,7 +2226,9 @@ mod tests {
 
         unsafe {
             CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
-            (*cfs_ktimer()).set_active(false);
+            let cfs = cfs_ktimer();
+            (*cfs).set_active(false);
+            queue.insert(cfs);
 
             ktimer.init_rt_ktimer(&mut rt.thread);
             queue.insert(ktimer.entity_mut());
@@ -2264,7 +2236,8 @@ mod tests {
             let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
 
             assert!(next.is_null());
-            assert!(!queue.contains(cfs_ktimer().cast_const()));
+            assert!(!(*cfs).is_active());
+            assert!(queue.contains(cfs.cast_const()));
         }
 
         assert_eq!(rt.runtime, 0);
