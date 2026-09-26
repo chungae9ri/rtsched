@@ -9,11 +9,13 @@ pub const TICKS_PER_MS: u32 = SYS_CLK_HZ / 1000;
 pub const CFS_PERIOD_TICKS: u32 = 30 * TICKS_PER_MS;
 pub const CFS_EXEC_TICKS: u32 = 10 * TICKS_PER_MS;
 
-pub fn init_scheduler() {
+pub fn init_scheduler(cfs_enabled: bool) {
     unsafe {
         rtsched::update_sys_clk_freq(SYS_CLK_HZ);
         rtsched::init_ktimer_queue();
-        rtsched::init_cfs(CFS_PERIOD_TICKS, CFS_EXEC_TICKS);
+        if cfs_enabled {
+            rtsched::init_cfs(CFS_PERIOD_TICKS, CFS_EXEC_TICKS);
+        }
     }
 }
 

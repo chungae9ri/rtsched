@@ -20,8 +20,8 @@ use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
 use crate::sync::SyncType;
 use crate::thread::{
-    CfsThread, RtThread, ThreadCtx, ThreadHandle, ThreadRef, ThreadState, cfs_thread_from_handle,
-    rt_ktimer_entity, rt_thread_from_handle, set_rt_ktimer_entity,
+    CfsThread, RtThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadRef, ThreadState,
+    cfs_thread_from_handle, rt_ktimer_entity, rt_thread_from_handle, set_rt_ktimer_entity,
 };
 use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
@@ -597,6 +597,11 @@ unsafe fn print_current_thread_statistics(now_ticks: u64) {
             return;
         }
 
+        if crate::sched::is_idle_thread(current) {
+            print_basic_thread_statistics("  ", "current", &*current, "idle");
+            return;
+        }
+
         let current = ThreadHandle::from_thread_ctx(current);
         if crate::sched::CURRENT_THREAD_IS_CFS {
             print_cfs_thread_statistics("  ", "current", &*cfs_thread_from_handle(current));
@@ -620,8 +625,7 @@ unsafe fn print_idle_thread_statistics() {
             return;
         }
 
-        let idle = ThreadHandle::from_thread_ctx(idle);
-        print_cfs_thread_statistics("  ", "idle", &*cfs_thread_from_handle(idle));
+        print_basic_thread_statistics("  ", "idle", &*idle, "idle");
     }
 }
 
@@ -687,6 +691,23 @@ fn print_cfs_thread_statistics(indent: &str, label: &str, thread: &CfsThread) {
         sched_info.priority,
         sched_info.sched_tick_cnt,
         sched_info.vruntime
+    );
+}
+
+fn print_basic_thread_statistics(
+    indent: &str,
+    label: &str,
+    thread_ctx: &ThreadCtx,
+    class: &'static str,
+) {
+    crate::rtsched_println!(
+        "{}{}: id={} name='{}' class={} state={}",
+        indent,
+        label,
+        thread_ctx.id,
+        thread_ctx.name,
+        class,
+        thread_state_name(thread_ctx.state)
     );
 }
 
@@ -789,9 +810,9 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
 
             (*wait_thread_ptr).set_state(ThreadState::Ready);
             crate::trace::record_wakeup(wait_thread_ptr);
-            if (*wait_thread_ptr).is_cfs {
+            if (*wait_thread_ptr).is_cfs() {
                 enqueue_runq_from_waitq(wait_thread);
-            } else {
+            } else if (*wait_thread_ptr).is_rt() {
                 let ktimer_entity = rt_ktimer_entity(wait_thread);
                 let rt_thread = rt_thread_from_handle(wait_thread);
 
@@ -891,7 +912,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
 pub(crate) fn dequeue_ktimerq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         let thread_ptr = thread.as_ptr();
-        if (*thread_ptr).is_cfs {
+        if !(*thread_ptr).is_rt() {
             return Err(WaitQueueError::NotFound);
         }
 
@@ -917,7 +938,7 @@ pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueue
 pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         let thread_ptr = thread.as_ptr();
-        if (*thread_ptr).is_cfs {
+        if !(*thread_ptr).is_rt() {
             return Err(WaitQueueError::NotFound);
         }
 
@@ -1007,10 +1028,10 @@ pub(crate) unsafe fn update_next_ktimer(entity: *mut KTimerEntity) {
 
 unsafe fn thread_scheduler_ktimer(thread: ThreadHandle) -> *mut KTimerEntity {
     unsafe {
-        if (*thread.as_ptr()).is_cfs {
-            ptr::addr_of_mut!(CFS_KTIMER.entity)
-        } else {
-            rt_ktimer_entity(thread)
+        match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
+            ThreadKind::Rt => rt_ktimer_entity(thread),
+            ThreadKind::Idle => ptr::null_mut(),
         }
     }
 }
@@ -1204,14 +1225,15 @@ fn yes_no(value: bool) -> &'static str {
 
 unsafe fn activate_cfs_ktimer(queue: &mut KTimerQueue) -> *mut KTimerEntity {
     let cfs = cfs_ktimer();
-    if !cfs.is_null() {
-        unsafe {
-            (*cfs).set_active(true);
-            if queue.contains(cfs.cast_const()) {
-                queue.update_first_active_cache_with(cfs);
-            }
-        }
+    if cfs.is_null() || !queue.contains(cfs.cast_const()) {
+        return ptr::null_mut();
     }
+
+    unsafe {
+        (*cfs).set_active(true);
+        queue.update_first_active_cache_with(cfs);
+    }
+
     cfs
 }
 
@@ -1221,7 +1243,7 @@ pub(crate) unsafe fn yield_ktimer(
     reset_runtime: bool,
 ) -> *mut KTimerEntity {
     critical_section(|| unsafe {
-        let queue = &mut *KTIMER_QUEUE.get();
+        let queue: &mut KTimerQueue = &mut *KTIMER_QUEUE.get();
         yield_ktimer_in_queue(queue, entity, elapsed, reset_runtime)
     })
 }
@@ -1636,7 +1658,7 @@ impl Default for KTimerQueue {
 mod tests {
     use super::*;
     use crate::TEST_LOCK;
-    use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadState};
+    use crate::thread::{RtThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, insert_wait_thread, wait_entity};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::string::String;
@@ -1662,7 +1684,7 @@ mod tests {
                 id: 1,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: false,
+                kind: ThreadKind::Rt,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: crate::sync::SyncEntity::new(),
@@ -2113,6 +2135,27 @@ mod tests {
     }
 
     #[test]
+    fn activate_cfs_ktimer_returns_null_when_cfs_timer_is_not_queued() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        unsafe {
+            init_ktimer_queue();
+            CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
+
+            let queue = &mut *KTIMER_QUEUE.get();
+            let cfs = cfs_ktimer();
+            (*cfs).set_active(false);
+
+            let activated = activate_cfs_ktimer(queue);
+
+            assert!(activated.is_null());
+            assert!(!(*cfs).is_active());
+            assert!(!queue.contains(cfs.cast_const()));
+            assert!(queue.first_active().is_null());
+        }
+    }
+
+    #[test]
     fn pop_first_returns_timers_in_deadline_order() {
         let mut queue = KTimerQueue::new();
         let mut timers = [
@@ -2201,6 +2244,33 @@ mod tests {
         assert_eq!(ktimer.entity.expire_at(), 60);
         assert_eq!(queue.now_ticks(), 15);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
+    }
+
+    #[test]
+    fn rt_yield_without_active_timers_and_without_cfs_timer_returns_null() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut queue = KTimerQueue::new();
+        let mut rt = rt_thread("rt");
+        let mut ktimer = RtKTimer::new(60, ptr::null_mut(), "rt");
+
+        unsafe {
+            CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
+            (*cfs_ktimer()).set_active(false);
+
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            queue.insert(ktimer.entity_mut());
+
+            let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
+
+            assert!(next.is_null());
+            assert!(!queue.contains(cfs_ktimer().cast_const()));
+        }
+
+        assert_eq!(rt.runtime, 0);
+        assert!(!ktimer.entity.is_active());
+        assert_eq!(ktimer.entity.expire_at(), 60);
+        assert_eq!(queue.now_ticks(), 15);
     }
 
     #[test]
@@ -2314,6 +2384,38 @@ mod tests {
         assert!(ktimer.entity.is_active());
         assert_eq!(ktimer.entity.expire_at(), 60);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 10);
+    }
+
+    #[test]
+    fn rt_only_initialization_does_not_enqueue_cfs_ktimer() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut rt = rt_thread("control");
+        let mut ktimer = RtKTimer::new(100, ptr::null_mut(), "control");
+
+        unsafe {
+            init_ktimer_queue();
+            ktimer.init_rt_thread(&mut rt);
+            enqueue_ktimer(ktimer.entity_mut());
+
+            let queue = &*KTIMER_QUEUE.get();
+            let mut entity = queue.first();
+            let mut saw_rt_timer = false;
+            let mut saw_wait_timer = false;
+
+            while !entity.is_null() {
+                assert!(
+                    !is_cfs_ktimer(entity),
+                    "RT-only initialization must not enqueue CFS_KTIMER"
+                );
+                saw_rt_timer |= ptr::eq(entity, ktimer.entity_mut());
+                saw_wait_timer |= is_wait_ktimer(entity);
+                entity = queue.next(entity);
+            }
+
+            assert!(saw_rt_timer);
+            assert!(saw_wait_timer);
+        }
     }
 
     #[test]

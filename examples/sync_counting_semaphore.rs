@@ -11,7 +11,7 @@ use cortex_m_rt::{entry, exception};
 
 static mut IDLE_STACK: rtsched::AlignedStack<{ common::STACK_WORDS }> =
     rtsched::AlignedStack([0; common::STACK_WORDS]);
-static mut IDLE_THREAD: MaybeUninit<rtsched::CfsThread> = MaybeUninit::uninit();
+static mut IDLE_THREAD: MaybeUninit<rtsched::IdleThread> = MaybeUninit::uninit();
 
 static mut PRODUCER_STACK: rtsched::AlignedStack<{ common::STACK_WORDS }> =
     rtsched::AlignedStack([0; common::STACK_WORDS]);
@@ -35,12 +35,8 @@ static TAKE_ERRORS: AtomicU32 = AtomicU32::new(0);
 #[entry]
 fn main() -> ! {
     unsafe {
-        common::init_scheduler();
+        common::init_scheduler(true);
 
-        let idle = rtsched::CfsThreadBuilder::new("cpu_idle", common::cpu_idle, 16).spawn(
-            core::ptr::addr_of_mut!(IDLE_THREAD),
-            core::ptr::addr_of_mut!(IDLE_STACK),
-        );
         rtsched::CfsThreadBuilder::new("token_producer", token_producer, 2).spawn(
             core::ptr::addr_of_mut!(PRODUCER_THREAD),
             core::ptr::addr_of_mut!(PRODUCER_STACK),
@@ -54,14 +50,17 @@ fn main() -> ! {
             core::ptr::addr_of_mut!(SLOW_CONSUMER_STACK),
         );
 
-        rtsched::register_idle_thread(idle);
-
         let Some(mut peripherals) = cortex_m::Peripherals::take() else {
             common::idle_forever();
         };
         common::configure_systick(&mut peripherals.SYST);
 
-        rtsched::spawn_main_thread(idle)
+        rtsched::spawn_main_thread(
+            "cpu_idle",
+            common::cpu_idle,
+            core::ptr::addr_of_mut!(IDLE_THREAD),
+            core::ptr::addr_of_mut!(IDLE_STACK),
+        )
     }
 }
 

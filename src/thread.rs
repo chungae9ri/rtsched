@@ -95,30 +95,33 @@ impl ThreadHandle {
 
     /// Return whether this handle refers to an RT thread.
     pub fn is_rt(self) -> bool {
-        !self.is_cfs()
+        self.with_thread_ctx(ThreadCtx::is_rt)
+    }
+
+    /// Return whether this handle refers to the scheduler idle thread.
+    pub fn is_idle(self) -> bool {
+        self.with_thread_ctx(ThreadCtx::is_idle)
     }
 }
 
 impl fmt::Debug for ThreadHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (id, name, state, is_cfs) = self.with_thread_ctx(|thread| {
-            (thread.id(), thread.name(), thread.state(), thread.is_cfs())
-        });
+        let (id, name, state, kind) = self
+            .with_thread_ctx(|thread| (thread.id(), thread.name(), thread.state(), thread.kind()));
 
         f.debug_struct("ThreadHandle")
             .field("id", &id)
             .field("name", &name)
             .field("state", &state)
-            .field("is_cfs", &is_cfs)
+            .field("kind", &kind)
             .finish()
     }
 }
 
-/// Validation failures that can be reported before a thread is spawned.
+/// Validation failures that can be detected before a thread is spawned.
 ///
-/// Use `try_spawn` when setup code wants to handle these failures explicitly.
-/// The `spawn` convenience methods treat the same cases as programmer errors
-/// and panic with the corresponding message.
+/// Thread builders treat these cases as programmer errors and panic with the
+/// corresponding message before writing thread storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadSpawnError {
     NullThreadStorage,
@@ -184,6 +187,32 @@ impl ThreadState {
     }
 }
 
+/// Scheduler-visible concrete thread kind.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadKind {
+    /// Scheduler fallback used when no normal work is runnable.
+    Idle,
+    /// CFS-scheduled background thread.
+    Cfs,
+    /// Soft real-time thread with an RT kernel timer.
+    Rt,
+}
+
+impl ThreadKind {
+    pub const fn is_idle(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub const fn is_cfs(self) -> bool {
+        matches!(self, Self::Cfs)
+    }
+
+    pub const fn is_rt(self) -> bool {
+        matches!(self, Self::Rt)
+    }
+}
+
 /// 8-byte aligned stack storage for platform thread contexts.
 #[repr(align(8))]
 pub struct AlignedStack<const N: usize>(pub [u32; N]);
@@ -233,8 +262,8 @@ pub struct ThreadCtx {
     pub name: &'static str,
     /// Current lifecycle state used by the scheduler.
     pub state: ThreadState,
-    /// Scheduler class for the concrete thread control block.
-    pub is_cfs: bool,
+    /// Concrete scheduler-visible thread kind.
+    pub kind: ThreadKind,
 }
 
 impl ThreadCtx {
@@ -250,8 +279,20 @@ impl ThreadCtx {
         self.state
     }
 
+    pub const fn kind(&self) -> ThreadKind {
+        self.kind
+    }
+
+    pub const fn is_idle(&self) -> bool {
+        self.kind.is_idle()
+    }
+
     pub const fn is_cfs(&self) -> bool {
-        self.is_cfs
+        self.kind.is_cfs()
+    }
+
+    pub const fn is_rt(&self) -> bool {
+        self.kind.is_rt()
     }
 
     pub(crate) fn set_state(&mut self, next: ThreadState) {
@@ -260,6 +301,28 @@ impl ThreadCtx {
             "invalid thread state transition"
         );
         self.state = next;
+    }
+}
+
+/// Thread control block for the scheduler idle fallback.
+///
+/// Idle threads carry only the common context required by the context-switch
+/// backend. They deliberately have no CFS run-queue entity, RT timer entity,
+/// wait entity, or sync entity.
+#[repr(C)]
+pub struct IdleThread {
+    /// Common context. This must remain the first field because assembly and
+    /// timer code use `*mut ThreadCtx` as the shared thin pointer type.
+    pub(crate) thread: ThreadCtx,
+}
+
+impl IdleThread {
+    pub fn thread_ctx(&self) -> &ThreadCtx {
+        &self.thread
+    }
+
+    pub fn thread_ctx_mut(&mut self) -> &mut ThreadCtx {
+        &mut self.thread
     }
 }
 
@@ -381,7 +444,7 @@ fn wait_info_from_entity(entity: &WaitEntity) -> (u32, Option<SyncType>) {
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
 pub trait ThreadControlBlock {
-    const IS_CFS: bool;
+    const KIND: ThreadKind;
 
     /// Scheduler-class-specific initialization argument.
     type InitArgs;
@@ -401,11 +464,23 @@ pub trait ThreadControlBlock {
     /// this initialization against scheduler interrupts and other thread
     /// creation.
     unsafe fn init(thread: *mut Self, common: ThreadCtx, args: Self::InitArgs) -> *mut ThreadCtx;
+
+    fn validate_init_args(_args: &Self::InitArgs) -> Result<(), ThreadSpawnError> {
+        Ok(())
+    }
 }
 
 impl ThreadControlBlock for CfsThread {
-    const IS_CFS: bool = true;
+    const KIND: ThreadKind = ThreadKind::Cfs;
     type InitArgs = u32;
+
+    fn validate_init_args(priority: &Self::InitArgs) -> Result<(), ThreadSpawnError> {
+        if *priority == 0 {
+            Err(ThreadSpawnError::ZeroPriority)
+        } else {
+            Ok(())
+        }
+    }
 
     unsafe fn init(
         thread: *mut Self,
@@ -432,8 +507,16 @@ impl ThreadControlBlock for CfsThread {
 }
 
 impl ThreadControlBlock for RtThread {
-    const IS_CFS: bool = false;
+    const KIND: ThreadKind = ThreadKind::Rt;
     type InitArgs = *mut RtKTimer;
+
+    fn validate_init_args(ktimer: &Self::InitArgs) -> Result<(), ThreadSpawnError> {
+        if ktimer.is_null() {
+            Err(ThreadSpawnError::NullRtTimer)
+        } else {
+            Ok(())
+        }
+    }
 
     unsafe fn init(thread: *mut Self, common: ThreadCtx, ktimer: Self::InitArgs) -> *mut ThreadCtx {
         assert!(!ktimer.is_null(), "RT thread ktimer must be non-null");
@@ -524,40 +607,39 @@ impl CfsThreadBuilder {
         thread: *mut MaybeUninit<CfsThread>,
         stack: *mut AlignedStack<N>,
     ) -> ThreadHandle {
-        unsafe {
-            self.try_spawn(thread, stack)
-                .unwrap_or_else(|error| panic!("{}", error.message()))
-        }
+        unsafe { spawn_thread(thread, stack, self.start, self.priority) }
     }
+}
 
-    /// Validate and initialize a CFS thread without panicking on setup errors.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must be properly aligned, uniquely owned writable storage for
-    /// one `CfsThread` when non-null. `stack` must be uniquely owned writable
-    /// stack storage when non-null, with a top address aligned for the active
-    /// platform and enough room for the initial frame.
-    ///
-    /// This method reports null pointers, undersized stacks, misaligned stack
-    /// tops, and zero priority as `ThreadSpawnError`, but it cannot validate
-    /// aliasing, dangling pointers, or lifetime requirements. Valid storage
-    /// must remain at fixed addresses and outlive all scheduler use of the
-    /// returned handle. Call this after `init_cfs` and while thread creation
-    /// and scheduler globals are not being concurrently accessed. The entry
-    /// function must use the `ThreadEntry` ABI and must not return; any
-    /// argument pointer supplied with `with_arg` must remain valid for the
-    /// entry function's use.
-    pub unsafe fn try_spawn<const N: usize>(
-        self,
-        thread: *mut MaybeUninit<CfsThread>,
-        stack: *mut AlignedStack<N>,
-    ) -> Result<ThreadHandle, ThreadSpawnError> {
-        if self.priority == 0 {
-            return Err(ThreadSpawnError::ZeroPriority);
-        }
+pub(crate) unsafe fn spawn_idle_thread<const N: usize>(
+    start: ThreadStart,
+    thread: *mut MaybeUninit<IdleThread>,
+    stack: *mut AlignedStack<N>,
+) -> ThreadHandle {
+    validate_thread_storage(thread).unwrap_or_else(|error| panic!("{}", error.message()));
+    validate_stack(stack).unwrap_or_else(|error| panic!("{}", error.message()));
 
-        unsafe { try_spawn_thread(thread, stack, self.start, self.priority) }
+    unsafe {
+        let initial_context = platform::init_thread_stack(stack_top(stack), start.entry, start.arg);
+        let id = NEXT_THREAD_ID;
+        NEXT_THREAD_ID = NEXT_THREAD_ID.wrapping_add(1);
+
+        ptr::write(
+            thread.cast::<IdleThread>(),
+            IdleThread {
+                thread: ThreadCtx {
+                    sp: initial_context.sp,
+                    exc_return: initial_context.exc_return,
+                    id,
+                    name: start.name,
+                    state: ThreadState::Ready,
+                    kind: ThreadKind::Idle,
+                },
+            },
+        );
+
+        let common_thread = ptr::addr_of_mut!((*thread.cast::<IdleThread>()).thread);
+        ThreadHandle::from_thread_ctx(common_thread)
     }
 }
 
@@ -602,65 +684,29 @@ impl RtThreadBuilder {
         thread: *mut MaybeUninit<RtThread>,
         stack: *mut AlignedStack<N>,
     ) -> ThreadHandle {
-        unsafe {
-            self.try_spawn(thread, stack)
-                .unwrap_or_else(|error| panic!("{}", error.message()))
-        }
-    }
-
-    /// Validate and initialize an RT thread without panicking on setup errors.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must be properly aligned, uniquely owned writable storage for
-    /// one `RtThread` when non-null. `stack` must be uniquely owned writable
-    /// stack storage when non-null, with a top address aligned for the active
-    /// platform and enough room for the initial frame.
-    ///
-    /// This method reports null pointers, undersized stacks, misaligned stack
-    /// tops, and a null timer pointer as `ThreadSpawnError`, but it cannot
-    /// validate aliasing, dangling pointers, or lifetime requirements. The
-    /// `RtKTimer` pointer supplied to `new` must be uniquely owned by this
-    /// thread and not already queued for another thread. Valid thread, stack,
-    /// and timer storage must remain at fixed addresses and outlive all
-    /// scheduler use of the returned handle. Call this after
-    /// `init_ktimer_queue` and while thread creation and scheduler globals are
-    /// not being concurrently accessed. The entry function must use the
-    /// `ThreadEntry` ABI and must not return; any argument pointer supplied
-    /// with `with_arg` must remain valid for the entry function's use.
-    pub unsafe fn try_spawn<const N: usize>(
-        self,
-        thread: *mut MaybeUninit<RtThread>,
-        stack: *mut AlignedStack<N>,
-    ) -> Result<ThreadHandle, ThreadSpawnError> {
-        if self.ktimer.is_null() {
-            return Err(ThreadSpawnError::NullRtTimer);
-        }
-
-        unsafe { try_spawn_thread(thread, stack, self.start, self.ktimer) }
+        unsafe { spawn_thread(thread, stack, self.start, self.ktimer) }
     }
 }
 
-unsafe fn try_spawn_thread<T: ThreadControlBlock, const N: usize>(
+unsafe fn spawn_thread<T: ThreadControlBlock, const N: usize>(
     thread: *mut MaybeUninit<T>,
     stack: *mut AlignedStack<N>,
     start: ThreadStart,
     init_args: T::InitArgs,
-) -> Result<ThreadHandle, ThreadSpawnError> {
-    validate_thread_storage(thread)?;
-    validate_stack(stack)?;
+) -> ThreadHandle {
+    T::validate_init_args(&init_args).unwrap_or_else(|error| panic!("{}", error.message()));
+    validate_thread_storage(thread).unwrap_or_else(|error| panic!("{}", error.message()));
+    validate_stack(stack).unwrap_or_else(|error| panic!("{}", error.message()));
 
     unsafe {
-        let handle = forkyi(
+        forkyi(
             thread.cast::<T>(),
             stack_top(stack),
             start.entry,
             start.arg,
             start.name,
             init_args,
-        );
-
-        Ok(handle)
+        )
     }
 }
 
@@ -748,7 +794,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             id,
             name,
             state: ThreadState::Ready,
-            is_cfs: T::IS_CFS,
+            kind: T::KIND,
         };
         ThreadHandle::from_thread_ctx(T::init(thread, common, init_args))
     }
@@ -817,10 +863,10 @@ pub(crate) unsafe fn rt_sync_entity(thread: ThreadHandle) -> *mut SyncEntity {
 
 pub(crate) unsafe fn sync_entity(thread: ThreadHandle) -> *mut SyncEntity {
     unsafe {
-        if (*thread.as_ptr()).is_cfs {
-            cfs_sync_entity(thread)
-        } else {
-            rt_sync_entity(thread)
+        match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => cfs_sync_entity(thread),
+            ThreadKind::Rt => rt_sync_entity(thread),
+            ThreadKind::Idle => panic!("idle thread has no sync entity"),
         }
     }
 }
@@ -884,10 +930,10 @@ pub(crate) unsafe fn rt_thread_from_handle(thread: ThreadHandle) -> *mut RtThrea
 
 pub(crate) unsafe fn thread_ref_from_handle<'a>(thread: ThreadHandle) -> ThreadRef<'a> {
     unsafe {
-        if (*thread.as_ptr()).is_cfs {
-            ThreadRef::Cfs(&*cfs_thread_from_handle(thread))
-        } else {
-            ThreadRef::Rt(&*rt_thread_from_handle(thread))
+        match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => ThreadRef::Cfs(&*cfs_thread_from_handle(thread)),
+            ThreadKind::Rt => ThreadRef::Rt(&*rt_thread_from_handle(thread)),
+            ThreadKind::Idle => panic!("idle thread has no thread reference"),
         }
     }
 }
@@ -920,7 +966,7 @@ pub fn current_thread_id() -> Option<ThreadId> {
 
 pub fn set_rt_thread_start_time(start_time: u32) -> bool {
     unsafe {
-        if !CURRENT_THREAD_CTX.is_null() && !CURRENT_THREAD_IS_CFS {
+        if !CURRENT_THREAD_CTX.is_null() && (*CURRENT_THREAD_CTX).is_rt() {
             let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
             let rt_thread = rt_thread_from_handle(current_thread);
             (*rt_thread).runtime = start_time;
@@ -933,7 +979,7 @@ pub fn set_rt_thread_start_time(start_time: u32) -> bool {
 
 pub fn current_rt_thread_runtime() -> Option<u32> {
     critical_section(|| unsafe {
-        if CURRENT_THREAD_CTX.is_null() || CURRENT_THREAD_IS_CFS {
+        if CURRENT_THREAD_CTX.is_null() || !(*CURRENT_THREAD_CTX).is_rt() {
             None
         } else {
             let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
@@ -952,10 +998,10 @@ pub fn yieldyi() {
     critical_section(|| unsafe {
         let elapsed: u32 = elapsed_ticks_since_current_reload();
         let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
-        let current_ktimer = if CURRENT_THREAD_IS_CFS {
-            ptr::addr_of_mut!(CFS_KTIMER.entity)
-        } else {
-            rt_ktimer_entity(current_thread)
+        let current_ktimer = match (*current_thread.as_ptr()).kind {
+            ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
+            ThreadKind::Rt => rt_ktimer_entity(current_thread),
+            ThreadKind::Idle => return,
         };
 
         let next_ktimer = yield_ktimer(current_ktimer, elapsed, true);
@@ -970,18 +1016,18 @@ pub fn msleepyi(msec: u32) {
     critical_section(|| unsafe {
         let elapsed = elapsed_ticks_since_current_reload();
         let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
-        let current_ktimer = if CURRENT_THREAD_IS_CFS {
-            ptr::addr_of_mut!(CFS_KTIMER.entity)
-        } else {
-            rt_ktimer_entity(current_thread)
+        let current_ktimer = match (*current_thread.as_ptr()).kind {
+            ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
+            ThreadKind::Rt => rt_ktimer_entity(current_thread),
+            ThreadKind::Idle => return,
         };
 
         let _ = yield_ktimer(current_ktimer, elapsed, false);
 
-        let wait_entity = if CURRENT_THREAD_IS_CFS {
-            cfs_wait_entity(current_thread)
-        } else {
-            rt_wait_entity(current_thread)
+        let wait_entity = match (*current_thread.as_ptr()).kind {
+            ThreadKind::Cfs => cfs_wait_entity(current_thread),
+            ThreadKind::Rt => rt_wait_entity(current_thread),
+            ThreadKind::Idle => return,
         };
         (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
         (*wait_entity).waitevt = None;
@@ -1010,7 +1056,7 @@ mod tests {
                 id: 1,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: true,
+                kind: ThreadKind::Cfs,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: SyncEntity::new(),
@@ -1026,7 +1072,7 @@ mod tests {
                 id: 2,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: false,
+                kind: ThreadKind::Rt,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: SyncEntity::new(),
@@ -1102,14 +1148,47 @@ mod tests {
             assert_eq!(handle.state(), ThreadState::Ready);
             assert!(handle.is_cfs());
             assert!(!handle.is_rt());
+            assert!(!handle.is_idle());
             assert_eq!((*thread).name, "cfs");
-            assert!((*thread).is_cfs);
+            assert!((*thread).is_cfs());
             assert_eq!(cfs.sched_entity.priority, 3);
             assert_eq!(
                 (*thread).sp,
                 stack.0.as_mut_ptr().wrapping_add(64 - 16) as usize as u32
             );
             assert_eq!(stack.0[64 - 8], arg as usize as u32);
+        }
+    }
+
+    #[test]
+    fn spawn_idle_thread_initializes_storage_without_cfs_run_queue_priority() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut storage = MaybeUninit::<IdleThread>::uninit();
+        let mut stack = AlignedStack([0; 64]);
+
+        unsafe {
+            crate::runq::init_cfs_rq();
+            let handle = spawn_idle_thread(
+                ThreadStart::new("idle", test_entry),
+                &mut storage,
+                &mut stack,
+            );
+            let thread = handle.as_ptr();
+            let idle = &*storage.as_ptr();
+
+            assert!(ptr::eq(thread, ptr::addr_of!(idle.thread).cast_mut()));
+            assert_eq!(handle.name(), "idle");
+            assert_eq!(handle.state(), ThreadState::Ready);
+            assert!(handle.is_idle());
+            assert!(!handle.is_cfs());
+            assert!(!handle.is_rt());
+            assert_eq!((*thread).kind(), ThreadKind::Idle);
+            assert_eq!((*crate::runq::CFS_RUN_QUEUE.get()).len(), 0);
+            assert_eq!(*crate::runq::CFS_RUN_QUEUE.priority_sum(), 0);
+            assert_eq!(
+                (*thread).sp,
+                stack.0.as_mut_ptr().wrapping_add(64 - 16) as usize as u32
+            );
         }
     }
 
@@ -1133,8 +1212,9 @@ mod tests {
             assert_eq!(handle.state(), ThreadState::Ready);
             assert!(!handle.is_cfs());
             assert!(handle.is_rt());
+            assert!(!handle.is_idle());
             assert_eq!((*thread).name, "rt");
-            assert!(!(*thread).is_cfs);
+            assert!((*thread).is_rt());
             assert_eq!(rt.runtime, 0);
             assert!(ptr::eq(
                 rt.ktimer_entity().unwrap().as_ptr(),
@@ -1158,52 +1238,46 @@ mod tests {
     }
 
     #[test]
-    fn cfs_thread_builder_try_spawn_reports_validation_errors() {
-        let mut storage = MaybeUninit::<CfsThread>::uninit();
+    #[should_panic(expected = "thread storage pointer must be non-null")]
+    fn cfs_thread_builder_spawn_panics_on_null_thread_storage() {
         let mut stack = AlignedStack([0; 64]);
-        let mut small_stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS - 1]);
-        let mut odd_stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS + 1]);
 
         unsafe {
-            assert_eq!(
-                CfsThreadBuilder::new("bad", test_entry, 1).try_spawn(ptr::null_mut(), &mut stack),
-                Err(ThreadSpawnError::NullThreadStorage)
-            );
-            assert_eq!(
-                CfsThreadBuilder::new("bad", test_entry, 1)
-                    .try_spawn(&mut storage, ptr::null_mut::<AlignedStack<64>>()),
-                Err(ThreadSpawnError::NullStack)
-            );
-            assert_eq!(
-                CfsThreadBuilder::new("bad", test_entry, 1)
-                    .try_spawn(&mut storage, &mut small_stack),
-                Err(ThreadSpawnError::StackTooSmall {
-                    required_words: THREAD_INITIAL_FRAME_WORDS,
-                    actual_words: THREAD_INITIAL_FRAME_WORDS - 1,
-                })
-            );
-            assert_eq!(
-                CfsThreadBuilder::new("bad", test_entry, 1).try_spawn(&mut storage, &mut odd_stack),
-                Err(ThreadSpawnError::UnalignedStackTop)
-            );
-            assert_eq!(
-                CfsThreadBuilder::new("bad", test_entry, 0).try_spawn(&mut storage, &mut stack),
-                Err(ThreadSpawnError::ZeroPriority)
-            );
+            CfsThreadBuilder::new("bad", test_entry, 1).spawn(ptr::null_mut(), &mut stack);
         }
     }
 
     #[test]
-    fn rt_thread_builder_try_spawn_reports_null_timer() {
+    #[should_panic(expected = "thread stack pointer must be non-null")]
+    fn cfs_thread_builder_spawn_panics_on_null_stack() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+
+        unsafe {
+            CfsThreadBuilder::new("bad", test_entry, 1)
+                .spawn(&mut storage, ptr::null_mut::<AlignedStack<64>>());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "thread stack top must be 8-byte aligned")]
+    fn cfs_thread_builder_spawn_panics_on_unaligned_stack_top() {
+        let mut storage = MaybeUninit::<CfsThread>::uninit();
+        let mut odd_stack = AlignedStack([0; THREAD_INITIAL_FRAME_WORDS + 1]);
+
+        unsafe {
+            CfsThreadBuilder::new("bad", test_entry, 1).spawn(&mut storage, &mut odd_stack);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "RT thread ktimer must be non-null")]
+    fn rt_thread_builder_spawn_panics_on_null_timer() {
         let mut storage = MaybeUninit::<RtThread>::uninit();
         let mut stack = AlignedStack([0; 64]);
 
         unsafe {
-            assert_eq!(
-                RtThreadBuilder::new("bad", test_entry, ptr::null_mut())
-                    .try_spawn(&mut storage, &mut stack),
-                Err(ThreadSpawnError::NullRtTimer)
-            );
+            RtThreadBuilder::new("bad", test_entry, ptr::null_mut())
+                .spawn(&mut storage, &mut stack);
         }
     }
 

@@ -383,7 +383,7 @@ mod tests {
     use super::*;
     use crate::TEST_LOCK;
     use crate::ktimer::init_ktimer_queue;
-    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadState};
+    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState};
     use crate::waitq::{WAIT_QUEUE, WaitEntity, wait_entity};
     use std::vec::Vec;
 
@@ -409,7 +409,7 @@ mod tests {
                 id: 0,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: true,
+                kind: ThreadKind::Cfs,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: crate::sync::SyncEntity::new(),

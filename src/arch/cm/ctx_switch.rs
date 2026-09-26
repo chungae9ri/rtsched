@@ -6,9 +6,8 @@ mod imp {
     use core::arch::{asm, global_asm};
     use core::ptr;
 
-    use crate::runq::CFS_RUN_QUEUE;
     use crate::sched::{CURRENT_THREAD_IS_CFS, is_idle_thread, reset_scheduler_started};
-    use crate::thread::{ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity};
+    use crate::thread::{ThreadCtx, ThreadHandle, ThreadState};
 
     #[unsafe(no_mangle)]
     static mut START_THREAD_PTR: *mut ThreadCtx = ptr::null_mut();
@@ -22,20 +21,22 @@ mod imp {
     ///
     /// # Safety
     ///
-    /// `thread` must refer to a live thread initialized by `forkyi` or a thread
-    /// builder, and its stack storage must remain valid for the lifetime of the
-    /// running thread. Call this only once the scheduler queues have been
-    /// initialized and no other thread is currently running.
+    /// `thread` must refer to the registered idle thread initialized by
+    /// `platform::spawn_main_thread`, and its stack storage must remain valid
+    /// for the lifetime of the running thread. Call this only once the
+    /// scheduler queues have been initialized and no other thread is currently
+    /// running.
     pub unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
         unsafe {
             let thread_ptr = thread.as_ptr();
-            if !is_idle_thread(thread_ptr) {
-                (*CFS_RUN_QUEUE.get()).remove(cfs_sched_entity(thread));
-            }
+            assert!(
+                is_idle_thread(thread_ptr) && (*thread_ptr).is_idle(),
+                "first scheduler thread must be the registered idle thread"
+            );
             (*thread_ptr).set_state(ThreadState::Running);
             reset_scheduler_started();
             START_THREAD_PTR = thread_ptr;
-            CURRENT_THREAD_IS_CFS = true;
+            CURRENT_THREAD_IS_CFS = (*thread_ptr).is_cfs();
             asm!("svc 0", options(noreturn));
         }
     }

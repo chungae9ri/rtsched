@@ -19,9 +19,10 @@ use crate::ktimer::{
 };
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
-use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
+use crate::sched::CURRENT_THREAD_CTX;
 use crate::thread::{
-    ThreadHandle, ThreadState, rt_ktimer_entity, sync_entity, thread_handle_from_sync_entity,
+    ThreadHandle, ThreadKind, ThreadState, rt_ktimer_entity, sync_entity,
+    thread_handle_from_sync_entity,
 };
 use crate::waitq::{WaitQueueError, remove_wait_thread, wait_entity};
 
@@ -656,7 +657,7 @@ unsafe fn boost_owner_deadline(
     };
 
     let boost_deadline_at = unsafe {
-        if (*owner.as_ptr()).is_cfs && (*waiter.as_ptr()).is_cfs {
+        if (*owner.as_ptr()).is_cfs() && (*waiter.as_ptr()).is_cfs() {
             return;
         }
 
@@ -717,10 +718,10 @@ unsafe fn block_current_thread(
         );
 
         let elapsed = elapsed_ticks_since_current_reload();
-        let current_ktimer = if CURRENT_THREAD_IS_CFS {
-            ptr::addr_of_mut!(CFS_KTIMER.entity)
-        } else {
-            rt_ktimer_entity(thread)
+        let current_ktimer = match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
+            ThreadKind::Rt => rt_ktimer_entity(thread),
+            ThreadKind::Idle => return Err(WaitQueueError::NotFound),
         };
 
         let deadline_at = if current_ktimer.is_null() {
@@ -735,10 +736,10 @@ unsafe fn block_current_thread(
         (*wait_entity).wake_at = WAIT_FOREVER_TICKS;
         (*wait_entity).waitevt = Some(sync_type);
 
-        if CURRENT_THREAD_IS_CFS {
-            dequeue_runq_to_waitq(thread)?;
-        } else {
-            dequeue_ktimerq_to_waitq(thread)?;
+        match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => dequeue_runq_to_waitq(thread)?,
+            ThreadKind::Rt => dequeue_ktimerq_to_waitq(thread)?,
+            ThreadKind::Idle => return Err(WaitQueueError::NotFound),
         }
 
         Ok(deadline_at)
@@ -776,12 +777,12 @@ unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
 
 unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     unsafe {
-        if (*thread.as_ptr()).is_cfs {
+        if (*thread.as_ptr()).is_cfs() {
             remove_wait_thread(thread);
             crate::trace::record_wakeup(thread.as_ptr());
             enqueue_runq_from_waitq(thread);
             program_wait_ktimer();
-        } else {
+        } else if (*thread.as_ptr()).is_rt() {
             enqueue_ktimerq_from_waitq(thread)?;
         }
 
@@ -797,7 +798,9 @@ mod tests {
     use crate::rbtree::RBTree;
     use crate::runq::{CFS_RUN_QUEUE, SchedEntity, enqueue_thread};
     use crate::sched::{CURRENT_THREAD_IS_CFS, init_cfs};
-    use crate::thread::{CfsThread, RtThread, ThreadCtx, cfs_sched_entity, rt_ktimer_entity};
+    use crate::thread::{
+        CfsThread, RtThread, ThreadCtx, ThreadKind, cfs_sched_entity, rt_ktimer_entity,
+    };
     use crate::waitq::{WAIT_QUEUE, WaitEntity};
 
     fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
@@ -808,7 +811,7 @@ mod tests {
                 id: 1,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: true,
+                kind: ThreadKind::Cfs,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: SyncEntity::new(),
@@ -824,7 +827,7 @@ mod tests {
                 id: 1,
                 name,
                 state: ThreadState::Ready,
-                is_cfs: false,
+                kind: ThreadKind::Rt,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: SyncEntity::new(),

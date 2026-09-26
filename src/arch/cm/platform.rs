@@ -9,6 +9,7 @@
 //! context-switch backend without changing the ktimer queue logic.
 
 use core::ffi::c_void;
+use core::mem::MaybeUninit;
 
 use cortex_m::peripheral::{DCB, DWT};
 #[cfg(target_arch = "arm")]
@@ -16,7 +17,9 @@ use cortex_m::peripheral::{SCB, SYST};
 
 #[cfg(target_arch = "arm")]
 use crate::clock::ticks_per_ms;
-use crate::thread::{ThreadEntry, ThreadHandle};
+use crate::thread::{
+    AlignedStack, IdleThread, ThreadEntry, ThreadHandle, ThreadStart, spawn_idle_thread,
+};
 
 const CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS: u32 = 24;
 const CORTEX_M_SCHEDULER_TIMER_RELOAD_MIN: u32 = 1;
@@ -73,10 +76,10 @@ pub trait ContextSwitchPort {
 
     /// # Safety
     ///
-    /// `thread` must refer to a live thread created by a thread builder for
-    /// the active platform. Its stack and thread storage must outlive all
-    /// scheduler use, the scheduler queues must already be initialized, and no
-    /// other scheduler thread may already be running.
+    /// `thread` must refer to the live registered idle thread created for the
+    /// active platform. Its stack and thread storage must outlive all scheduler
+    /// use, the scheduler queues must already be initialized, and no other
+    /// scheduler thread may already be running.
     ///
     /// Call this only from privileged single-core startup code after the
     /// platform exception handlers and scheduler timer are configured enough
@@ -302,20 +305,35 @@ impl ContextSwitchPort for HostPlatform {
     }
 }
 
-/// Spawn the first scheduler thread using the platform context-switch entry.
+/// Initialize the idle thread and spawn it as the first scheduler thread.
 ///
 /// # Safety
 ///
-/// `thread` must refer to a live thread created by a thread builder for the
-/// active platform. Its stack and thread storage must outlive all scheduler
-/// use, `init_ktimer_queue` and `init_cfs` must have completed, and no other
-/// scheduler thread may already be running.
+/// `thread` must be non-null, properly aligned, uniquely owned writable storage
+/// for one `IdleThread`. `stack` must be non-null, uniquely owned writable stack
+/// storage for the idle thread, with a top address aligned for the active
+/// platform and enough room for the initial platform frame.
+///
+/// Both storage objects must remain at fixed addresses and outlive all
+/// scheduler use. `init_ktimer_queue` must have completed, and if CFS scheduling
+/// is used, `init_cfs` must have completed. The idle thread is registered as the
+/// scheduler fallback before the platform context-switch entry restores it.
 ///
 /// Call this only from privileged single-core startup code after the platform
 /// exception handlers and scheduler timer are configured enough for the
-/// context-switch backend to restore the thread.
-pub unsafe fn spawn_main_thread(thread: ThreadHandle) -> ! {
-    unsafe { <DefaultPlatform as ContextSwitchPort>::spawn_main_thread(thread) }
+/// context-switch backend to restore the thread, and before any other scheduler
+/// thread is running.
+pub unsafe fn spawn_main_thread<const N: usize>(
+    name: &'static str,
+    entry: ThreadEntry,
+    thread: *mut MaybeUninit<IdleThread>,
+    stack: *mut AlignedStack<N>,
+) -> ! {
+    unsafe {
+        let thread = spawn_idle_thread(ThreadStart::new(name, entry), thread, stack);
+        crate::sched::register_idle_thread(thread);
+        <DefaultPlatform as ContextSwitchPort>::spawn_main_thread(thread)
+    }
 }
 
 #[cfg(target_arch = "arm")]
