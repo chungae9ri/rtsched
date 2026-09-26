@@ -9,10 +9,9 @@ use crate::ktimer::{
     elapsed_ticks_since_last_interrupt, enqueue_ktimer, is_cfs_ktimer, next_ktimer,
     program_next_scheduler_timer, update_next_ktimer,
 };
-use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, dequeue_thread, init_cfs_rq};
+use crate::runq::{CFS_RUN_QUEUE, SchedEntity, cfs_vruntime_delta, init_cfs_rq};
 use crate::thread::{
-    CfsThread, ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
-    thread_handle_from_cfs_sched_entity,
+    ThreadCtx, ThreadHandle, ThreadState, cfs_sched_entity, thread_handle_from_cfs_sched_entity,
 };
 
 #[unsafe(no_mangle)]
@@ -65,18 +64,17 @@ pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     }
 }
 
-/// Register the CFS thread that should run when no normal work is runnable.
+/// Register the thread that should run when no normal work is runnable.
 ///
-/// The idle thread is deliberately removed from the CFS run queue so it does
-/// not participate in fairness accounting. It is selected only as a scheduler
-/// fallback.
+/// The idle thread is a scheduler fallback only. It is neither a CFS nor RT
+/// thread and must never participate in CFS fairness accounting or RT timer
+/// scheduling.
 ///
 /// # Safety
 ///
-/// `thread` must refer to a live CFS thread created by a thread builder. The
-/// thread should be newly spawned or otherwise quiescent: it must not be the
-/// currently running thread, must not be waiting, and must not also be used as
-/// normal runnable work.
+/// `thread` must refer to a live `IdleThread`. The thread should be newly
+/// spawned or otherwise quiescent: it must not be the currently running thread,
+/// must not be waiting, and must not also be used as normal runnable work.
 ///
 /// The thread's backing storage and stack must outlive all scheduler use. Call
 /// this after `init_cfs`, before starting the scheduler, and while scheduler
@@ -85,9 +83,8 @@ pub unsafe fn register_idle_thread(thread: ThreadHandle) {
     let thread_ptr = thread.as_ptr();
 
     crate::critical_section(|| unsafe {
-        assert!((*thread_ptr).is_cfs, "idle thread must be a CFS thread");
+        assert!((*thread_ptr).is_idle(), "idle thread must be an IdleThread");
 
-        dequeue_thread(thread);
         IDLE_THREAD_CTX = thread_ptr;
     });
 }
@@ -98,12 +95,11 @@ pub(crate) unsafe fn is_idle_thread(thread: *const ThreadCtx) -> bool {
 
 pub fn traverse_idle_thread_fn<F>(mut f: F)
 where
-    F: FnMut(&CfsThread),
+    F: FnMut(&ThreadCtx),
 {
     crate::critical_section(|| unsafe {
         if !IDLE_THREAD_CTX.is_null() {
-            let idle = ThreadHandle::from_thread_ctx(IDLE_THREAD_CTX);
-            f(&*cfs_thread_from_handle(idle));
+            f(&*IDLE_THREAD_CTX);
         }
     });
 }
@@ -129,12 +125,23 @@ unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
 
 unsafe fn switch_to_idle_thread() {
     unsafe {
-        let idle = IDLE_THREAD_CTX;
-        if idle.is_null() {
+        let idle_thread_ptr = IDLE_THREAD_CTX;
+        if idle_thread_ptr.is_null() {
             return;
         }
 
-        switch_to_cfs_thread(ThreadHandle::from_thread_ctx(idle));
+        crate::trace::record_context_switch(CURRENT_THREAD_CTX, idle_thread_ptr);
+
+        if !CURRENT_THREAD_CTX.is_null()
+            && CURRENT_THREAD_CTX != idle_thread_ptr
+            && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
+        {
+            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+        }
+
+        (*idle_thread_ptr).set_state(ThreadState::Running);
+        CURRENT_THREAD_CTX = idle_thread_ptr;
+        CURRENT_THREAD_IS_CFS = (*idle_thread_ptr).is_cfs();
     }
 }
 
@@ -201,7 +208,9 @@ extern "C" fn schedule() {
             }
         }
 
-        if is_cfs_ktimer(next_ktimer) {
+        if next_ktimer.is_null() {
+            switch_to_idle_thread_with_current_requeued();
+        } else if is_cfs_ktimer(next_ktimer) {
             if !(*next_ktimer).is_active() {
                 switch_to_idle_thread_with_current_requeued();
             } else if let Some(next_entity) = (*CFS_RUN_QUEUE.get()).pop_first() {
@@ -327,7 +336,7 @@ mod tests {
         RtKTimer, clear_elapsed_ticks_since_last_interrupt_for_test, init_ktimer_queue,
         set_elapsed_ticks_since_last_interrupt_for_test,
     };
-    use crate::thread::{CfsThread, RtThread, ThreadHandle};
+    use crate::thread::{CfsThread, IdleThread, RtThread, ThreadHandle, ThreadKind};
     use crate::waitq::WaitEntity;
 
     fn cfs_thread(
@@ -343,7 +352,7 @@ mod tests {
                 id: 1,
                 name,
                 state,
-                is_cfs: true,
+                kind: ThreadKind::Cfs,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: crate::sync::SyncEntity::new(),
@@ -361,12 +370,25 @@ mod tests {
                 id: 2,
                 name,
                 state: ThreadState::Running,
-                is_cfs: false,
+                kind: ThreadKind::Rt,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: crate::sync::SyncEntity::new(),
             ktimer_entity: ptr::null_mut(),
             runtime: 0,
+        }
+    }
+
+    fn idle_thread(name: &'static str, state: ThreadState) -> IdleThread {
+        IdleThread {
+            thread: ThreadCtx {
+                sp: 0,
+                exc_return: 0,
+                id: 0,
+                name,
+                state,
+                kind: ThreadKind::Idle,
+            },
         }
     }
 
@@ -436,17 +458,35 @@ mod tests {
     }
 
     #[test]
-    fn handle_sched_tick_ignores_interrupt_before_scheduler_start() {
+    fn handle_sched_tick_ignores_queued_work_before_scheduler_start() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        reset_scheduler_started();
+        let mut cfs = cfs_thread("cfs", 1, 0, ThreadState::Ready);
+        let mut rt = rt_thread("rt");
+        let mut rt_ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
+        rt.thread.state = ThreadState::Ready;
+
         unsafe {
+            let _ = reset_sched_state();
+            queue_cfs_thread(&mut cfs.thread);
+            rt_ktimer.init_rt_ktimer(&mut rt.thread);
+            enqueue_ktimer(rt_ktimer.entity_mut());
+            reset_scheduler_started();
             CURRENT_THREAD_CTX = ptr::null_mut();
+            CURRENT_THREAD_IS_CFS = false;
         }
 
         handle_sched_tick();
 
-        assert!(!scheduler_started());
+        assert_eq!(cfs.thread.state, ThreadState::Ready);
+        assert_eq!(rt.thread.state, ThreadState::Ready);
+        unsafe {
+            assert!(CURRENT_THREAD_CTX.is_null());
+            assert!(!CURRENT_THREAD_IS_CFS);
+            assert!((*CFS_RUN_QUEUE.get()).contains((&cfs.sched_entity) as *const SchedEntity));
+            assert!(ptr::eq(next_ktimer(), rt_ktimer.entity_mut()));
+            assert!(!scheduler_started());
+        }
     }
 
     #[test]
@@ -627,23 +667,27 @@ mod tests {
     }
 
     #[test]
-    fn register_idle_thread_removes_it_from_cfs_run_queue() {
+    fn register_idle_thread_rejects_cfs_and_rt_threads() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut cfs = cfs_thread("cfs", 16, 0, ThreadState::Ready);
+        let mut rt = rt_thread("rt");
 
         unsafe {
             let _ = reset_sched_state();
-            queue_cfs_thread(&mut idle.thread);
 
-            register_idle_thread(thread_handle(&mut idle.thread));
-        }
+            let cfs_result = catch_unwind(AssertUnwindSafe(|| {
+                register_idle_thread(thread_handle(&mut cfs.thread));
+            }));
+            let rt_result = catch_unwind(AssertUnwindSafe(|| {
+                register_idle_thread(thread_handle(&mut rt.thread));
+            }));
 
-        unsafe {
-            assert!(ptr::eq(IDLE_THREAD_CTX, &idle.thread));
-            assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
-            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
-            assert!(idle.thread.state == ThreadState::Ready);
+            assert!(cfs_result.is_err());
+            assert!(rt_result.is_err());
+            assert!(IDLE_THREAD_CTX.is_null());
         }
     }
 
@@ -651,7 +695,7 @@ mod tests {
     fn cfs_timer_switches_from_rt_thread_to_idle_when_run_queue_is_empty() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut rt = rt_thread("rt");
 
         unsafe {
@@ -667,7 +711,33 @@ mod tests {
         assert!(rt.thread.state == ThreadState::Ready);
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
-            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(!CURRENT_THREAD_IS_CFS);
+            assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
+            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
+        }
+    }
+
+    #[test]
+    fn null_next_timer_switches_from_rt_thread_to_idle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        let mut idle = idle_thread("idle", ThreadState::Ready);
+        let mut rt = rt_thread("rt");
+
+        unsafe {
+            let _ = reset_sched_state();
+            register_idle_thread(thread_handle(&mut idle.thread));
+            CURRENT_THREAD_CTX = &mut rt.thread;
+            CURRENT_THREAD_IS_CFS = false;
+
+            schedule_for_test(ptr::null_mut(), 0);
+        }
+
+        assert!(idle.thread.state == ThreadState::Running);
+        assert!(rt.thread.state == ThreadState::Ready);
+        unsafe {
+            assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
+            assert!(!CURRENT_THREAD_IS_CFS);
             assert_eq!((*CFS_RUN_QUEUE.get()).len(), 0);
             assert_eq!(*CFS_RUN_QUEUE.priority_sum(), 0);
         }
@@ -677,7 +747,7 @@ mod tests {
     fn cfs_timer_switches_from_current_cfs_to_idle_when_run_queue_is_empty() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut current = cfs_thread("current", 2, 0, ThreadState::Running);
 
         unsafe {
@@ -694,7 +764,7 @@ mod tests {
         assert!(current.thread.state == ThreadState::Ready);
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
-            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(!CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
                 &current.sched_entity
@@ -707,7 +777,7 @@ mod tests {
     fn inactive_cfs_timer_falls_back_to_idle_without_popping_queued_cfs_thread() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut rt = rt_thread("rt");
         let mut queued = cfs_thread("queued", 1, 0, ThreadState::Ready);
 
@@ -727,7 +797,7 @@ mod tests {
         assert!(queued.thread.state == ThreadState::Ready);
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
-            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(!CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
                 &queued.sched_entity
@@ -739,7 +809,7 @@ mod tests {
     fn idle_thread_yields_to_queued_cfs_thread_without_entering_run_queue() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut queued = cfs_thread("queued", 1, 0, ThreadState::Ready);
 
         unsafe {
@@ -747,7 +817,7 @@ mod tests {
             register_idle_thread(thread_handle(&mut idle.thread));
             idle.thread.state = ThreadState::Running;
             CURRENT_THREAD_CTX = &mut idle.thread;
-            CURRENT_THREAD_IS_CFS = true;
+            CURRENT_THREAD_IS_CFS = false;
             queue_cfs_thread(&mut queued.thread);
 
             schedule_for_test(cfs_ktimer, 0);
@@ -767,7 +837,7 @@ mod tests {
     fn rt_timer_switches_from_idle_thread_without_requeueing_idle() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut rt = rt_thread("rt");
         let mut rt_ktimer = RtKTimer::new(50, ptr::null_mut(), "rt");
 
@@ -777,7 +847,7 @@ mod tests {
             idle.thread.state = ThreadState::Running;
             rt_ktimer.init_rt_ktimer(&mut rt.thread);
             CURRENT_THREAD_CTX = &mut idle.thread;
-            CURRENT_THREAD_IS_CFS = true;
+            CURRENT_THREAD_IS_CFS = false;
 
             schedule_for_test(rt_ktimer.entity_mut(), 0);
         }
@@ -796,7 +866,7 @@ mod tests {
     fn idle_fallback_requeues_current_cfs_thread() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut current = cfs_thread("current", 2, 0, ThreadState::Running);
 
         unsafe {
@@ -813,7 +883,7 @@ mod tests {
         assert!(current.thread.state == ThreadState::Ready);
         unsafe {
             assert!(ptr::eq(CURRENT_THREAD_CTX, &idle.thread));
-            assert!(CURRENT_THREAD_IS_CFS);
+            assert!(!CURRENT_THREAD_IS_CFS);
             assert!(ptr::eq(
                 (*CFS_RUN_QUEUE.get()).first(),
                 &current.sched_entity
@@ -826,7 +896,7 @@ mod tests {
     fn traverse_idle_thread_visits_registered_idle_thread() {
         let _guard = TEST_LOCK.lock().unwrap();
 
-        let mut idle = cfs_thread("idle", 16, 0, ThreadState::Ready);
+        let mut idle = idle_thread("idle", ThreadState::Ready);
         let mut seen = ptr::null();
 
         unsafe {
@@ -835,7 +905,7 @@ mod tests {
         }
 
         traverse_idle_thread_fn(|thread| {
-            seen = thread.thread_ctx() as *const ThreadCtx;
+            seen = thread as *const ThreadCtx;
         });
 
         assert!(ptr::eq(seen, &idle.thread));

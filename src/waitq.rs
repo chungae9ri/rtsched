@@ -9,8 +9,8 @@ use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::sync::SyncType;
 use crate::thread::{
-    ThreadHandle, ThreadRef, cfs_wait_entity, rt_wait_entity, thread_handle_from_wait_entity,
-    thread_ref_from_handle,
+    ThreadHandle, ThreadKind, ThreadRef, cfs_wait_entity, rt_wait_entity,
+    thread_handle_from_wait_entity, thread_ref_from_handle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,10 +159,10 @@ where
 
 pub(crate) unsafe fn wait_entity(thread: ThreadHandle) -> *mut WaitEntity {
     unsafe {
-        if (*thread.as_ptr()).is_cfs {
-            cfs_wait_entity(thread)
-        } else {
-            rt_wait_entity(thread)
+        match (*thread.as_ptr()).kind {
+            ThreadKind::Cfs => cfs_wait_entity(thread),
+            ThreadKind::Rt => rt_wait_entity(thread),
+            ThreadKind::Idle => panic!("idle thread has no wait entity"),
         }
     }
 }
@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::TEST_LOCK;
     use crate::runq::SchedEntity;
-    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadState};
+    use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState};
     use std::vec::Vec;
 
     fn reset_wait_queue() {
@@ -225,7 +225,7 @@ mod tests {
                 id: 0,
                 name,
                 state: ThreadState::Waiting,
-                is_cfs: true,
+                kind: ThreadKind::Cfs,
             },
             wait_entity: WaitEntity::new(),
             sync_entity: crate::sync::SyncEntity::new(),

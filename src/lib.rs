@@ -11,9 +11,8 @@
 //! architecture-specific context-switch entry points, stack storage, and
 //! concrete thread storage. A typical board initializes the timer queue with
 //! [`init_ktimer_queue`], configures CFS with [`init_cfs`], creates
-//! [`CfsThread`] and [`RtThread`] values with their builders, registers an idle
-//! CFS thread with [`register_idle_thread`], and starts execution with
-//! [`spawn_main_thread`].
+//! [`CfsThread`] and [`RtThread`] values with their builders, and starts the
+//! idle thread with [`spawn_main_thread`].
 //!
 //! The crate is `no_std` for embedded builds. Host-only test support provides
 //! scheduler state serialization so the same core data structures can be
@@ -70,10 +69,10 @@ mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, CfsThreadBuilder, RtThread, RtThreadBuilder, SchedInfo, ThreadCtx,
-    ThreadEntry, ThreadHandle, ThreadId, ThreadRef, ThreadSpawnError, ThreadStart, ThreadState,
-    current_rt_thread_runtime, current_thread, current_thread_id, msleepyi,
-    set_rt_thread_start_time, yieldyi,
+    AlignedStack, CfsThread, CfsThreadBuilder, IdleThread, RtThread, RtThreadBuilder, SchedInfo,
+    ThreadCtx, ThreadEntry, ThreadHandle, ThreadId, ThreadKind, ThreadRef, ThreadSpawnError,
+    ThreadStart, ThreadState, current_rt_thread_runtime, current_thread, current_thread_id,
+    msleepyi, set_rt_thread_start_time, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};

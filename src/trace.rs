@@ -27,7 +27,7 @@ impl TraceThread {
         Some(Self {
             id: thread.id,
             name: thread.name,
-            is_cfs: thread.is_cfs,
+            is_cfs: thread.is_cfs(),
         })
     }
 }
@@ -368,7 +368,7 @@ fn emit(event: TraceEvent) {
 mod tests {
     use super::*;
     use crate::TEST_LOCK;
-    use crate::thread::ThreadState;
+    use crate::thread::{ThreadKind, ThreadState};
     use std::sync::Mutex;
     use std::vec::Vec;
 
@@ -385,7 +385,11 @@ mod tests {
             id,
             name,
             state: ThreadState::Ready,
-            is_cfs,
+            kind: if is_cfs {
+                ThreadKind::Cfs
+            } else {
+                ThreadKind::Rt
+            },
         }
     }
 

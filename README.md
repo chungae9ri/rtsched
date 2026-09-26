@@ -34,9 +34,8 @@ The crate includes:
 `rtsched` is intended to be used by a board crate that owns hardware setup,
 clock configuration, `SysTick` configuration, thread stack allocation, and
 concrete thread storage. The board initializes the ktimer queue and CFS scheduler,
-creates threads with dedicated stacks, keeps the returned `ThreadHandle` values,
-registers the idle thread with `register_idle_thread`, then starts the first
-thread with `spawn_main_thread`.
+creates worker threads with dedicated stacks, keeps the returned `ThreadHandle`
+values as needed, then starts the idle thread with `spawn_main_thread`.
 Network stacks, filesystems, USB, shells, logging frameworks, and application services
 should live outside `rtsched` and use the kernel APIs rather than become part
 of the crate. Example board integrations live in
@@ -50,7 +49,7 @@ of the crate. Example board integrations live in
 | Timer framework | Intrusive red-black tree based `KTimer` queue for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
 | Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting` states, yielding, waiting, and idle-thread fallback. |
 | Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
-| Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code can register a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
+| Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code starts a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
 | Diagnostics | Lightweight tracing counters, optional callbacks, cycle-counter helpers, and scheduler timing diagnostics. |
 
 ## Platform common traits
@@ -216,10 +215,11 @@ execution slice is the time slice for one CFS scheduling window.
 
 CFS scheduling is used for non-time critical threads such as shell thread for user interaction.
 
-The idle thread is a CFS thread registered through `register_idle_thread`. It is
-removed from the CFS run queue and does not participate in CFS fairness
-accounting. The scheduler selects it only when no normal CFS thread is runnable
-and no active RT timer should run. Diagnostics can inspect it through
+The idle thread is a CFS thread initialized and registered by
+`spawn_main_thread`. It is removed from the CFS run queue and does not
+participate in CFS fairness accounting. The scheduler selects it only when no
+normal CFS thread is runnable and no active RT timer should run. Diagnostics can
+inspect it through
 `traverse_idle_thread_fn`.
 
 ## Soft Realtime Scheduler for RtThread
@@ -241,8 +241,11 @@ budget_ticks), ...)` when those meanings differ.
 
 ## `cpu_idle` Thread for Power Saving
 
-Board code can register a CFS thread as the idle thread with `register_idle_thread()`.
-The idle thread is removed from the normal CFS run queue and is selected only as a scheduler fallback.
+Board code starts a CFS idle thread with `spawn_main_thread()`. The helper
+initializes the idle thread storage and stack, registers it as the scheduler
+fallback, and restores it as the first running thread. The idle thread is
+removed from the normal CFS run queue and is selected only as a scheduler
+fallback.
 
 The scheduler selects `cpu_idle` when no RT timer is selected to run and either:
 
@@ -284,10 +287,10 @@ Tc: C=1, D=6
 The `rtsched/examples` directory contains small `no_std` Cortex-M programs that
 show how board code wires the scheduler together. They are intentionally
 board-neutral: each example initializes the scheduler, creates statically
-allocated threads and stacks, registers `cpu_idle`, programs SysTick from
-`next_ktimer_reload()`, and handles SysTick with `handle_sched_tick()`. The
-examples use atomic counters and spin loops as simple observable work instead
-of board-specific UART or LED drivers.
+allocated worker threads and stacks, programs SysTick from
+`next_ktimer_reload()`, starts `cpu_idle` with `spawn_main_thread()`, and handles
+SysTick with `handle_sched_tick()`. The examples use atomic counters and spin
+loops as simple observable work instead of board-specific UART or LED drivers.
 
 All examples share `examples/common/mod.rs`, which provides:
 
@@ -299,10 +302,10 @@ All examples share `examples/common/mod.rs`, which provides:
 - a `cpu_idle` thread that waits with `wfi`
 - a panic handler that parks the CPU in idle
 
-`minimal_cfs.rs` demonstrates the smallest normal CFS setup. It creates one
-registered `cpu_idle` CFS thread and one runnable `worker` CFS thread. The
-worker increments `WORKER_RUNS`, spins briefly, and calls `yieldyi()` so the
-scheduler can select the next runnable entity.
+`minimal_cfs.rs` demonstrates the smallest normal CFS setup. It starts one
+`cpu_idle` CFS thread and creates one runnable `worker` CFS thread. The worker
+increments `WORKER_RUNS`, spins briefly, and calls `yieldyi()` so the scheduler
+can select the next runnable entity.
 
 `minimal_rt.rs` demonstrates one periodic RT thread. The `control` thread uses
 `RtKTimer::new_with_timing()` with a 50 ms period, 20 ms relative deadline, and
