@@ -215,12 +215,10 @@ execution slice is the time slice for one CFS scheduling window.
 
 CFS scheduling is used for non-time critical threads such as shell thread for user interaction.
 
-The idle thread is a CFS thread initialized and registered by
-`spawn_main_thread`. It is removed from the CFS run queue and does not
-participate in CFS fairness accounting. The scheduler selects it only when no
-normal CFS thread is runnable and no active RT timer should run. Diagnostics can
-inspect it through
-`traverse_idle_thread_fn`.
+The idle thread is a dedicated `IdleThread` initialized and registered by
+`spawn_main_thread`. It does not participate in CFS fairness accounting or RT
+timer scheduling. The scheduler selects it only when no normal scheduler work is
+runnable. Diagnostics can inspect it through `traverse_idle_thread_fn`.
 
 ## Soft Realtime Scheduler for RtThread
 
@@ -241,17 +239,16 @@ budget_ticks), ...)` when those meanings differ.
 
 ## `cpu_idle` Thread for Power Saving
 
-Board code starts a CFS idle thread with `spawn_main_thread()`. The helper
+Board code starts a registered idle thread with `spawn_main_thread()`. The helper
 initializes the idle thread storage and stack, registers it as the scheduler
 fallback, and restores it as the first running thread. The idle thread is
-removed from the normal CFS run queue and is selected only as a scheduler
-fallback.
+selected only as a scheduler fallback.
 
-The scheduler selects `cpu_idle` when no RT timer is selected to run and either:
+The scheduler selects `cpu_idle` when:
 
-- the CFS ktimer is inactive, meaning the current CFS execution window is closed
-- the CFS run queue is empty, meaning all normal CFS threads are waiting or no
-  normal CFS thread has been spawned
+- no active scheduler timer is selected, so `NEXT_KTIMER` is null
+- the CFS ktimer is selected but the CFS run queue is empty, meaning all normal
+  CFS threads are waiting, or no normal CFS thread has been spawned
 
 Application code can put low-power behavior such as `wfi` in the idle thread.
 
@@ -303,7 +300,7 @@ All examples share `examples/common/mod.rs`, which provides:
 - a panic handler that parks the CPU in idle
 
 `minimal_cfs.rs` demonstrates the smallest normal CFS setup. It starts one
-`cpu_idle` CFS thread and creates one runnable `worker` CFS thread. The worker
+`cpu_idle` idle thread and creates one runnable `worker` CFS thread. The worker
 increments `WORKER_RUNS`, spins briefly, and calls `yieldyi()` so the scheduler
 can select the next runnable entity.
 
