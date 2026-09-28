@@ -21,12 +21,12 @@ use crate::thread::{
     AlignedStack, IdleThread, ThreadEntry, ThreadHandle, ThreadStart, spawn_idle_thread,
 };
 
-const CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS: u32 = 24;
-const CORTEX_M_SCHEDULER_TIMER_RELOAD_MIN: u32 = 1;
-const CORTEX_M_SCHEDULER_TIMER_RELOAD_MAX: u32 = (1 << CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS) - 1;
+pub(crate) const SCHEDULER_TIMER_RELOAD_BITS: u32 = 24;
+pub(crate) const SCHEDULER_TIMER_RELOAD_MIN: u32 = 1;
+pub(crate) const SCHEDULER_TIMER_RELOAD_MAX: u32 = (1 << SCHEDULER_TIMER_RELOAD_BITS) - 1;
 
-const CORTEX_M_THREAD_STACK_ALIGNMENT: usize = 8;
-const CORTEX_M_THREAD_INITIAL_FRAME_WORDS: usize = 16;
+pub(crate) const THREAD_STACK_ALIGNMENT: usize = 8;
+pub(crate) const THREAD_INITIAL_FRAME_WORDS: usize = 16;
 
 const INITIAL_XPSR_THUMB_STATE: u32 = 0x0100_0000;
 const EXC_RETURN_THREAD_MODE_PSP: u32 = 0xFFFF_FFFD;
@@ -135,22 +135,9 @@ pub type DefaultPlatform = CortexMPlatform;
 #[cfg(not(target_arch = "arm"))]
 pub type DefaultPlatform = HostPlatform;
 
-#[allow(dead_code)]
-pub(crate) const SCHEDULER_TIMER_RELOAD_BITS: u32 =
-    <DefaultPlatform as SchedulerTimerPort>::RELOAD_BITS;
-pub(crate) const SCHEDULER_TIMER_RELOAD_MIN: u32 =
-    <DefaultPlatform as SchedulerTimerPort>::RELOAD_MIN;
-pub(crate) const SCHEDULER_TIMER_RELOAD_MAX: u32 =
-    <DefaultPlatform as SchedulerTimerPort>::RELOAD_MAX;
-
-pub(crate) const THREAD_STACK_ALIGNMENT: usize =
-    <DefaultPlatform as ThreadStackPort>::STACK_ALIGNMENT;
-pub(crate) const THREAD_INITIAL_FRAME_WORDS: usize =
-    <DefaultPlatform as ThreadStackPort>::INITIAL_FRAME_WORDS;
-
 impl ThreadStackPort for CortexMPlatform {
-    const STACK_ALIGNMENT: usize = CORTEX_M_THREAD_STACK_ALIGNMENT;
-    const INITIAL_FRAME_WORDS: usize = CORTEX_M_THREAD_INITIAL_FRAME_WORDS;
+    const STACK_ALIGNMENT: usize = THREAD_STACK_ALIGNMENT;
+    const INITIAL_FRAME_WORDS: usize = THREAD_INITIAL_FRAME_WORDS;
 
     unsafe fn init_thread_stack(
         sp: *mut u32,
@@ -162,8 +149,8 @@ impl ThreadStackPort for CortexMPlatform {
 }
 
 impl ThreadStackPort for HostPlatform {
-    const STACK_ALIGNMENT: usize = CORTEX_M_THREAD_STACK_ALIGNMENT;
-    const INITIAL_FRAME_WORDS: usize = CORTEX_M_THREAD_INITIAL_FRAME_WORDS;
+    const STACK_ALIGNMENT: usize = THREAD_STACK_ALIGNMENT;
+    const INITIAL_FRAME_WORDS: usize = THREAD_INITIAL_FRAME_WORDS;
 
     unsafe fn init_thread_stack(
         sp: *mut u32,
@@ -180,7 +167,7 @@ unsafe fn init_cortex_m_thread_stack(
     arg: *mut c_void,
 ) -> InitialThreadContext {
     unsafe {
-        sp = ((sp as usize) & !(CORTEX_M_THREAD_STACK_ALIGNMENT - 1)) as *mut u32;
+        sp = ((sp as usize) & !(THREAD_STACK_ALIGNMENT - 1)) as *mut u32;
 
         sp = sp.sub(1);
         *sp = INITIAL_XPSR_THUMB_STATE;
@@ -338,9 +325,9 @@ pub unsafe fn spawn_main_thread<const N: usize>(
 
 #[cfg(target_arch = "arm")]
 impl SchedulerTimerPort for CortexMPlatform {
-    const RELOAD_BITS: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS;
-    const RELOAD_MIN: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_MIN;
-    const RELOAD_MAX: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_MAX;
+    const RELOAD_BITS: u32 = SCHEDULER_TIMER_RELOAD_BITS;
+    const RELOAD_MIN: u32 = SCHEDULER_TIMER_RELOAD_MIN;
+    const RELOAD_MAX: u32 = SCHEDULER_TIMER_RELOAD_MAX;
 
     fn reload() -> Option<u32> {
         Some(SYST::get_reload())
@@ -361,9 +348,9 @@ impl SchedulerTimerPort for CortexMPlatform {
 }
 
 impl SchedulerTimerPort for HostPlatform {
-    const RELOAD_BITS: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_BITS;
-    const RELOAD_MIN: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_MIN;
-    const RELOAD_MAX: u32 = CORTEX_M_SCHEDULER_TIMER_RELOAD_MAX;
+    const RELOAD_BITS: u32 = SCHEDULER_TIMER_RELOAD_BITS;
+    const RELOAD_MIN: u32 = SCHEDULER_TIMER_RELOAD_MIN;
+    const RELOAD_MAX: u32 = SCHEDULER_TIMER_RELOAD_MAX;
 
     fn reload() -> Option<u32> {
         None

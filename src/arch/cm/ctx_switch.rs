@@ -15,9 +15,9 @@ mod imp {
     /// Spawn main thread by restoring its prepared stack frame.
     ///
     /// This does not return. The thread must already have been initialized with the
-    /// same synthetic frame layout produced by `forkyi`. The actual exception
-    /// return happens in `SVCall`, because `EXC_RETURN` is only valid from
-    /// handler mode.
+    /// same synthetic basic frame layout produced by the platform thread-stack
+    /// initializer. The actual exception return happens in `SVCall`, because
+    /// `EXC_RETURN` is only valid from handler mode.
     ///
     /// # Safety
     ///
@@ -45,20 +45,23 @@ mod imp {
     // This is typically called at the end of `main`.
     // NOTE: Assembly below relies on the `ThreadCtx` layout defined in
     // `rtsched/src/thread.rs` where `ThreadCtx.sp` is the first field (offset 0)
-    // and `ThreadCtx.exc_return` is the second field (offset 4). The save/restore
-    // sequence performed by PendSV/SVCall pushes r4-r11 and, when EXC_RETURN bit 4
-    // indicates an active FP context, s16-s31 onto the thread's stack and stores
-    // the stack pointer into `ThreadCtx.sp`.
+    // and `ThreadCtx.exc_return` is the second field (offset 4). PendSV saves
+    // r4-r11 and, when EXC_RETURN bit 4 is clear, the active FP context's s16-s31
+    // onto the interrupted thread's stack before storing the stack pointer into
+    // `ThreadCtx.sp`. SVCall only restores the first thread's prepared basic
+    // frame and does not save an outgoing thread context.
     //
-    // Stack frame expectations produced by `forkyi`:
+    // Stack frame expectations produced by the platform thread-stack initializer:
     // - The synthetic thread entry frame left for exception return contains
     //   (from low to high addresses): r4..r11 (pushed by PendSV), then the
     //   standard hardware frame consumed by EXC_RETURN: r0, r1, r2, r3, r12, lr,
     //   pc, xPSR. `ThreadCtx.sp` points at the saved r4..r11 block (the full saved
     //   context begins at this pointer when restoring).
-    // - Threads that use the FPU also carry an extended hardware exception frame
-    //   for s0-s15/FPSCR and a software-saved s16-s31 block immediately above the
-    //   r4-r11 block. EXC_RETURN bit 4 selects whether the s16-s31 block is present.
+    // - Newly initialized threads start with a basic non-FP frame. After a running
+    //   thread has an active FP context, the hardware exception frame also carries
+    //   s0-s15/FPSCR, and PendSV adds a software-saved s16-s31 block immediately
+    //   above the r4-r11 block. EXC_RETURN bit 4 clear selects that extended
+    //   restore path.
     //
     // Offsets used by the assembly:
     // - `str r0, [r2]`    -> stores saved SP into `ThreadCtx.sp` (offset 0)
