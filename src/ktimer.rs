@@ -31,7 +31,7 @@ const KTIMER_EXPIRE_NEVER: u64 = u64::MAX;
 static KTIMER_QUEUE: GlobalKTimerQueue = GlobalKTimerQueue::new();
 static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
-pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::inactive();
+pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::new();
 
 #[cfg(test)]
 static TEST_ELAPSED_TICKS_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
@@ -103,7 +103,7 @@ pub(crate) struct KTimerEntity {
 }
 
 impl KTimerEntity {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const fn new(expire_ticks: u32) -> Self {
         Self::new_with_timing(expire_ticks, RtTiming::from_period(expire_ticks))
     }
@@ -118,7 +118,7 @@ impl KTimerEntity {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn expire(&self) -> u32 {
         self.expire_at.min(u64::from(u32::MAX)) as u32
     }
@@ -127,7 +127,6 @@ impl KTimerEntity {
         self.expire_at = u64::from(expire);
     }
 
-    #[allow(dead_code)]
     pub fn expire_at(&self) -> u64 {
         self.expire_at
     }
@@ -162,7 +161,7 @@ impl KTimerEntity {
         self.node.reset_links();
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
     }
@@ -229,19 +228,14 @@ impl CfsKTimer {
         ptr::addr_of_mut!(self.entity)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn execution_ticks(&self) -> u32 {
         self.entity.relative_deadline_ticks()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn period_ticks(&self) -> u32 {
         self.entity.period_ticks()
-    }
-
-    #[allow(dead_code)]
-    pub fn timing(&self) -> RtTiming {
-        self.entity.timing()
     }
 }
 
@@ -252,7 +246,7 @@ pub(crate) struct WaitKTimer {
 }
 
 impl WaitKTimer {
-    pub const fn inactive() -> Self {
+    pub const fn new() -> Self {
         Self {
             entity: KTimerEntity {
                 expire_at: KTIMER_EXPIRE_NEVER,
@@ -360,7 +354,7 @@ pub unsafe fn init_ktimer_queue() {
     critical_section(|| unsafe {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
         ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
-        ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::inactive());
+        ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::new());
         (*KTIMER_QUEUE.get()).insert((*ptr::addr_of_mut!(WAIT_KTIMER)).entity_mut());
     });
 }
@@ -1157,7 +1151,6 @@ fn wait_ktimer() -> *mut KTimerEntity {
     unsafe { ptr::addr_of_mut!(WAIT_KTIMER.entity) }
 }
 
-#[allow(dead_code)]
 unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
     unsafe {
         if is_cfs_ktimer(entity) {
@@ -1379,19 +1372,13 @@ impl KTimerQueue {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.tree.is_empty()
     }
 
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.tree.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn root(&self) -> *mut KTimerEntity {
-        self.tree.root()
     }
 
     pub fn first(&self) -> *mut KTimerEntity {
@@ -1402,7 +1389,7 @@ impl KTimerQueue {
         <KTimerEntity as RBTreeNode>::entity_of(self.first_active)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn last(&self) -> *mut KTimerEntity {
         self.tree.last()
     }
@@ -1419,7 +1406,7 @@ impl KTimerQueue {
         self.now_ticks
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn next_deadline(&self) -> Option<u32> {
         let first = self.first();
         if first.is_null() {
@@ -1572,7 +1559,7 @@ impl KTimerQueue {
     /// mutation and backed by storage that outlives the returned borrow.
     /// Callers must hold exclusive access to the queue and serialize removal
     /// against scheduler interrupts and other queue mutations.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub unsafe fn pop_first(&mut self) -> Option<&mut KTimerEntity> {
         let first = self.first();
         if first.is_null() {
@@ -1803,7 +1790,7 @@ mod tests {
         let mut queue = KTimerQueue::new();
         let mut short = KTimerEntity::new(3);
         let mut long = KTimerEntity::new(20);
-        let mut parked = WaitKTimer::inactive();
+        let mut parked = WaitKTimer::new();
 
         unsafe {
             queue.insert(&mut short);
