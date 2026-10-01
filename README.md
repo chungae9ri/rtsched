@@ -145,7 +145,6 @@ pub struct KTimerEntity {
     expire_at: u64,
     node: RbNode,
     active: bool,
-    pub miss_cnt: u32,
     timing: RtTiming,
 }
 ```
@@ -153,6 +152,8 @@ pub struct KTimerEntity {
 expiration. `KTimerEntity` also owns the `RtTiming` policy values used by both
 CFS and RT timers. For CFS, `period_ticks` is the CFS period and
 `relative_deadline_ticks` is the CFS execution slice.
+RT miss accounting is stored on `RtKTimer`, because CFS and wait timers do not
+have RT deadlines.
 The embedded `KTimerEntity` is keyed by the next absolute expiration or release
 time. `SysTick` programming works differently for `CfsKTimer` and `RtKTimer`.
 When `CfsKTimer` switches to active, it programs `SysTick` with its execution slice.
