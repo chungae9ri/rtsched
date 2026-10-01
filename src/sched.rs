@@ -254,7 +254,7 @@ extern "C" fn schedule() {
                 switch_to_idle_thread_with_current_requeued();
             }
         } else {
-            let next_thread = (*KTimerEntity::rt_ktimer(next_ktimer)).thread_ctx();
+            let next_thread = (*KTimerEntity::container_of(next_ktimer)).thread_ctx();
 
             if next_thread.is_null() {
                 return;

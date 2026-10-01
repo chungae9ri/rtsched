@@ -967,8 +967,8 @@ mod tests {
 
         unsafe {
             reset_scheduler_state();
-            owner_timer.init_rt_thread(&mut owner);
-            waiter_timer.init_rt_thread(&mut waiter);
+            owner_timer.init_rt_ktimer(&mut owner.thread);
+            waiter_timer.init_rt_ktimer(&mut waiter.thread);
             enqueue_ktimer(owner_timer.entity_mut());
             enqueue_ktimer(waiter_timer.entity_mut());
             make_running_rt(&mut owner);
@@ -1021,8 +1021,8 @@ mod tests {
 
         unsafe {
             reset_scheduler_state();
-            owner_timer.init_rt_thread(&mut owner);
-            waiter_timer.init_rt_thread(&mut waiter);
+            owner_timer.init_rt_ktimer(&mut owner.thread);
+            waiter_timer.init_rt_ktimer(&mut waiter.thread);
             enqueue_ktimer(owner_timer.entity_mut());
             enqueue_ktimer(waiter_timer.entity_mut());
             make_running_rt(&mut owner);
@@ -1071,8 +1071,8 @@ mod tests {
 
         unsafe {
             reset_scheduler_state();
-            waiter_timer.init_rt_thread(&mut waiter);
-            earlier_rt_timer.init_rt_thread(&mut earlier_rt);
+            waiter_timer.init_rt_ktimer(&mut waiter.thread);
+            earlier_rt_timer.init_rt_ktimer(&mut earlier_rt.thread);
             enqueue_ktimer(waiter_timer.entity_mut());
             enqueue_ktimer(earlier_rt_timer.entity_mut());
             make_running_cfs(&mut owner);
