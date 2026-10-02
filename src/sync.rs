@@ -779,7 +779,7 @@ unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     unsafe {
         if (*thread.as_ptr()).is_cfs() {
             remove_wait_thread(thread);
-            crate::trace::record_wakeup(thread.as_ptr());
+            crate::diagnostics::trace::record_wakeup(thread.as_ptr());
             enqueue_runq_from_waitq(thread);
             program_wait_ktimer();
         } else if (*thread.as_ptr()).is_rt() {
