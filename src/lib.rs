@@ -56,6 +56,7 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
 }
 
 mod clock;
+mod diagnostics;
 mod ktimer;
 #[doc(hidden)]
 pub mod print;
@@ -64,7 +65,6 @@ mod runq;
 mod sched;
 mod sync;
 mod thread;
-mod trace;
 mod waitq;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
@@ -100,7 +100,7 @@ pub use sync::{
     BinarySemaphore, CountingSemaphore, Mutex, MutexError, MutexGuard, SemaphoreError, SyncType,
 };
 
-pub use trace::{
+pub use diagnostics::trace::{
     SchedIsrTiming, TraceCounters, TraceEvent, TraceFn, TraceThread, clear_trace_fn,
     mark_sched_tick_to_pendsv_start, reset_sched_tick_to_pendsv_max_ticks,
     reset_sched_tick_to_pendsv_min_max_ticks, reset_sched_tick_to_pendsv_min_ticks,

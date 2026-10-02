@@ -18,10 +18,9 @@ use crate::arch::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_M
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
-use crate::sync::SyncType;
 use crate::thread::{
-    CfsThread, RtThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadRef, ThreadState,
-    cfs_thread_from_handle, rt_ktimer_entity, rt_thread_from_handle, set_rt_ktimer_entity,
+    RtThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState, rt_ktimer_entity,
+    rt_thread_from_handle, set_rt_ktimer_entity,
 };
 use crate::waitq::{
     WAIT_QUEUE, WaitQueueError, insert_wait_thread, pop_expired_wait_thread, remove_wait_thread,
@@ -380,63 +379,14 @@ unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
     }
 }
 
-unsafe fn cfs_period_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*entity).period_ticks() }
-}
-
-unsafe fn cfs_execution_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*entity).relative_deadline_ticks() }
-}
-
-unsafe fn rt_period_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*entity).period_ticks() }
-}
-
-unsafe fn rt_relative_deadline_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*entity).relative_deadline_ticks() }
-}
-
-unsafe fn rt_budget_ticks(entity: *mut KTimerEntity) -> u32 {
-    unsafe { (*entity).budget_ticks() }
-}
-
-unsafe fn set_rt_active_deadline_after_runtime(
-    entity: *mut KTimerEntity,
-    now_ticks: u64,
-    runtime: u32,
-) {
-    unsafe {
-        (*entity).set_expire_after(
-            now_ticks,
-            rt_relative_deadline_ticks(entity).saturating_sub(runtime),
-        );
-    }
-}
-
-unsafe fn set_rt_next_release_after_runtime(
-    entity: *mut KTimerEntity,
-    now_ticks: u64,
-    runtime: u32,
-) {
-    unsafe {
-        (*entity).set_expire_after(now_ticks, rt_period_ticks(entity).saturating_sub(runtime));
-    }
-}
-
-unsafe fn set_rt_next_deadline(entity: *mut KTimerEntity, now_ticks: u64) {
-    unsafe {
-        (*entity).set_expire_after(now_ticks, rt_relative_deadline_ticks(entity));
-    }
-}
-
 unsafe fn record_rt_budget_overrun(entity: *mut KTimerEntity, rt_thread: *mut RtThread) {
     unsafe {
-        if (*rt_thread).runtime > rt_budget_ticks(entity) {
+        if (*rt_thread).runtime > (*entity).budget_ticks() {
             crate::rtsched_println!(
                 "Budget overrun in thread '{}': runtime {} ticks exceeded budget {} ticks",
                 (*rt_thread).thread.name,
                 (*rt_thread).runtime,
-                rt_budget_ticks(entity)
+                (*entity).budget_ticks()
             );
             let rt_ktimer = KTimerEntity::container_of(entity);
             (*rt_ktimer).miss_cnt = (*rt_ktimer).miss_cnt.saturating_add(1);
@@ -445,7 +395,7 @@ unsafe fn record_rt_budget_overrun(entity: *mut KTimerEntity, rt_thread: *mut Rt
 }
 
 unsafe fn is_real_rt_deadline_miss(entity: *mut KTimerEntity, rt_thread: *mut RtThread) -> bool {
-    unsafe { (*rt_thread).runtime > rt_relative_deadline_ticks(entity) }
+    unsafe { (*rt_thread).runtime > (*entity).relative_deadline_ticks() }
 }
 
 unsafe fn record_rt_deadline_miss(
@@ -456,9 +406,9 @@ unsafe fn record_rt_deadline_miss(
     unsafe {
         let thread_name = (*rt_thread).thread.name;
         let runtime = (*rt_thread).runtime;
-        let relative_deadline = rt_relative_deadline_ticks(entity);
+        let relative_deadline = (*entity).relative_deadline_ticks();
 
-        crate::trace::record_deadline_miss(
+        crate::diagnostics::trace::record_deadline_miss(
             ptr::addr_of!((*rt_thread).thread),
             runtime,
             relative_deadline,
@@ -471,323 +421,8 @@ unsafe fn record_rt_deadline_miss(
             relative_deadline,
             runtime
         );
-        print_rt_deadline_miss_diagnostics(queue, entity, rt_thread);
+        crate::diagnostics::ktimer::print_rt_deadline_miss_diagnostics(queue, entity, rt_thread);
         panic!("RT deadline miss in thread '{}'", thread_name);
-    }
-}
-
-unsafe fn print_rt_deadline_miss_diagnostics(
-    queue: &KTimerQueue,
-    missed_entity: *mut KTimerEntity,
-    missed_thread: *mut RtThread,
-) {
-    unsafe {
-        crate::rtsched_println!("rt deadline miss diagnostics:");
-        print_ktimer_queue_statistics(queue, missed_entity);
-        print_thread_statistics(queue, missed_entity, missed_thread);
-    }
-}
-
-unsafe fn print_ktimer_queue_statistics(queue: &KTimerQueue, missed_entity: *mut KTimerEntity) {
-    unsafe {
-        crate::rtsched_println!(
-            "ktimer queue statistics: now={} len={} first_active='{}'",
-            queue.now_ticks(),
-            queue.len(),
-            ktimer_name_or_none(queue.first_active())
-        );
-
-        let mut entity = queue.first();
-        let mut printed_missed = false;
-        while !entity.is_null() {
-            let is_missed = ptr::eq(entity.cast_const(), missed_entity.cast_const());
-            if is_missed {
-                printed_missed = true;
-            }
-            print_ktimer_statistics(queue, entity, if is_missed { "*" } else { " " }, true);
-            entity = queue.next(entity);
-        }
-
-        if !missed_entity.is_null() && !printed_missed {
-            crate::rtsched_println!("  * expired timer was already removed from the queue");
-            print_ktimer_statistics(queue, missed_entity, "*", false);
-        }
-    }
-}
-
-unsafe fn print_ktimer_statistics(
-    queue: &KTimerQueue,
-    entity: *mut KTimerEntity,
-    marker: &'static str,
-    queued: bool,
-) {
-    unsafe {
-        if !is_cfs_ktimer(entity) && !is_wait_ktimer(entity) {
-            let rt_ktimer = KTimerEntity::container_of(entity);
-            crate::rtsched_println!(
-                "  {} name='{}' kind={} queued={} expire_at={} remaining={} active={} misses={}",
-                marker,
-                ktimer_name(entity),
-                ktimer_kind_name(entity),
-                yes_no(queued),
-                (*entity).expire_at(),
-                (*entity).remaining_at(queue.now_ticks()),
-                yes_no((*entity).is_active()),
-                (*rt_ktimer).miss_cnt
-            );
-
-            let thread_ctx = (*rt_ktimer).thread_ctx();
-            if thread_ctx.is_null() {
-                crate::rtsched_println!(
-                    "    rt timing: period={} relative_deadline={} budget={} thread=<none>",
-                    (*entity).period_ticks(),
-                    (*entity).relative_deadline_ticks(),
-                    (*entity).budget_ticks()
-                );
-            } else {
-                let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(thread_ctx));
-                crate::rtsched_println!(
-                    "    rt timing: period={} relative_deadline={} budget={} thread_id={} thread_state={} runtime={}",
-                    (*entity).period_ticks(),
-                    (*entity).relative_deadline_ticks(),
-                    (*entity).budget_ticks(),
-                    (*thread_ctx).id,
-                    thread_state_name((*thread_ctx).state),
-                    (*rt_thread).runtime
-                );
-            }
-        } else {
-            crate::rtsched_println!(
-                "  {} name='{}' kind={} queued={} expire_at={} remaining={} active={}",
-                marker,
-                ktimer_name(entity),
-                ktimer_kind_name(entity),
-                yes_no(queued),
-                (*entity).expire_at(),
-                (*entity).remaining_at(queue.now_ticks()),
-                yes_no((*entity).is_active())
-            );
-        }
-    }
-}
-
-unsafe fn print_thread_statistics(
-    queue: &KTimerQueue,
-    missed_entity: *mut KTimerEntity,
-    missed_thread: *mut RtThread,
-) {
-    unsafe {
-        crate::rtsched_println!("thread statistics:");
-        print_rt_thread_statistics(
-            "  ",
-            "missed",
-            &*missed_thread,
-            missed_entity,
-            queue.now_ticks(),
-        );
-        print_current_thread_statistics(queue.now_ticks());
-        print_idle_thread_statistics();
-        print_cfs_thread_statistics_list();
-        print_wait_thread_statistics_list();
-    }
-}
-
-unsafe fn print_current_thread_statistics(now_ticks: u64) {
-    unsafe {
-        let current = crate::sched::CURRENT_THREAD_CTX;
-        if current.is_null() {
-            crate::rtsched_println!("  current: <none>");
-            return;
-        }
-
-        if crate::sched::is_idle_thread(current) {
-            print_basic_thread_statistics("  ", "current", &*current, "idle");
-            return;
-        }
-
-        let current = ThreadHandle::from_thread_ctx(current);
-        if crate::sched::CURRENT_THREAD_IS_CFS {
-            print_cfs_thread_statistics("  ", "current", &*cfs_thread_from_handle(current));
-        } else {
-            print_rt_thread_statistics(
-                "  ",
-                "current",
-                &*rt_thread_from_handle(current),
-                rt_ktimer_entity(current),
-                now_ticks,
-            );
-        }
-    }
-}
-
-unsafe fn print_idle_thread_statistics() {
-    unsafe {
-        let idle = crate::sched::IDLE_THREAD_CTX;
-        if idle.is_null() {
-            crate::rtsched_println!("  idle: <none>");
-            return;
-        }
-
-        print_basic_thread_statistics("  ", "idle", &*idle, "idle");
-    }
-}
-
-fn print_cfs_thread_statistics_list() {
-    crate::rtsched_println!("  cfs threads:");
-    let mut saw_thread = false;
-    crate::runq::traverse_run_queue_fn(|thread| {
-        saw_thread = true;
-        print_cfs_thread_statistics("    ", "cfs", thread);
-    });
-    if !saw_thread {
-        crate::rtsched_println!("    <empty>");
-    }
-}
-
-fn print_wait_thread_statistics_list() {
-    crate::rtsched_println!("  wait queue:");
-    let mut saw_thread = false;
-    crate::waitq::traverse_wait_queue_fn(|thread| {
-        saw_thread = true;
-        match thread {
-            ThreadRef::Cfs(thread) => {
-                let (wait_ticks, waitevt) = thread.wait_info();
-                print_wait_thread_statistics(
-                    "    ",
-                    "wait",
-                    thread.thread_ctx(),
-                    "cfs",
-                    wait_ticks,
-                    waitevt,
-                    None,
-                );
-            }
-            ThreadRef::Rt(thread) => {
-                let (wait_ticks, waitevt) = thread.wait_info();
-                print_wait_thread_statistics(
-                    "    ",
-                    "wait",
-                    thread.thread_ctx(),
-                    "rt",
-                    wait_ticks,
-                    waitevt,
-                    Some(thread.runtime()),
-                );
-            }
-        }
-    });
-    if !saw_thread {
-        crate::rtsched_println!("    <empty>");
-    }
-}
-
-fn print_cfs_thread_statistics(indent: &str, label: &str, thread: &CfsThread) {
-    let thread_ctx = thread.thread_ctx();
-    let sched_info = thread.sched_info();
-    crate::rtsched_println!(
-        "{}{}: id={} name='{}' class=cfs state={} priority={} sched_ticks={} vruntime={}",
-        indent,
-        label,
-        thread_ctx.id,
-        thread_ctx.name,
-        thread_state_name(thread_ctx.state),
-        sched_info.priority,
-        sched_info.sched_tick_cnt,
-        sched_info.vruntime
-    );
-}
-
-fn print_basic_thread_statistics(
-    indent: &str,
-    label: &str,
-    thread_ctx: &ThreadCtx,
-    class: &'static str,
-) {
-    crate::rtsched_println!(
-        "{}{}: id={} name='{}' class={} state={}",
-        indent,
-        label,
-        thread_ctx.id,
-        thread_ctx.name,
-        class,
-        thread_state_name(thread_ctx.state)
-    );
-}
-
-fn print_rt_thread_statistics(
-    indent: &str,
-    label: &str,
-    thread: &RtThread,
-    ktimer_entity: *mut KTimerEntity,
-    now_ticks: u64,
-) {
-    let thread_ctx = thread.thread_ctx();
-    if ktimer_entity.is_null() {
-        crate::rtsched_println!(
-            "{}{}: id={} name='{}' class=rt state={} runtime={} ktimer=<none>",
-            indent,
-            label,
-            thread_ctx.id,
-            thread_ctx.name,
-            thread_state_name(thread_ctx.state),
-            thread.runtime()
-        );
-        return;
-    }
-
-    unsafe {
-        let rt_ktimer = KTimerEntity::container_of(ktimer_entity);
-        crate::rtsched_println!(
-            "{}{}: id={} name='{}' class=rt state={} runtime={} ktimer='{}' expire_at={} remaining={} active={} misses={}",
-            indent,
-            label,
-            thread_ctx.id,
-            thread_ctx.name,
-            thread_state_name(thread_ctx.state),
-            thread.runtime(),
-            ktimer_name(ktimer_entity),
-            (*ktimer_entity).expire_at(),
-            (*ktimer_entity).remaining_at(now_ticks),
-            yes_no((*ktimer_entity).is_active()),
-            (*rt_ktimer).miss_cnt
-        );
-    }
-}
-
-fn print_wait_thread_statistics(
-    indent: &str,
-    label: &str,
-    thread_ctx: &ThreadCtx,
-    class: &'static str,
-    wait_ticks: u32,
-    waitevt: Option<SyncType>,
-    runtime: Option<u32>,
-) {
-    if let Some(runtime) = runtime {
-        crate::rtsched_println!(
-            "{}{}: id={} name='{}' class={} state={} runtime={} wait_ticks={} waitevt={}",
-            indent,
-            label,
-            thread_ctx.id,
-            thread_ctx.name,
-            class,
-            thread_state_name(thread_ctx.state),
-            runtime,
-            wait_ticks,
-            sync_type_name(waitevt)
-        );
-    } else {
-        crate::rtsched_println!(
-            "{}{}: id={} name='{}' class={} state={} wait_ticks={} waitevt={}",
-            indent,
-            label,
-            thread_ctx.id,
-            thread_ctx.name,
-            class,
-            thread_state_name(thread_ctx.state),
-            wait_ticks,
-            sync_type_name(waitevt)
-        );
     }
 }
 
@@ -813,7 +448,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
             let wait_thread_ptr = wait_thread.as_ptr();
 
             (*wait_thread_ptr).set_state(ThreadState::Ready);
-            crate::trace::record_wakeup(wait_thread_ptr);
+            crate::diagnostics::trace::record_wakeup(wait_thread_ptr);
             if (*wait_thread_ptr).is_cfs() {
                 enqueue_runq_from_waitq(wait_thread);
             } else if (*wait_thread_ptr).is_rt() {
@@ -824,10 +459,11 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
                 record_rt_budget_overrun(ktimer_entity, rt_thread);
 
                 (*ktimer_entity).set_active(true);
-                set_rt_active_deadline_after_runtime(
-                    ktimer_entity,
+                (*ktimer_entity).set_expire_after(
                     queue.now_ticks(),
-                    (*rt_thread).runtime,
+                    (*ktimer_entity)
+                        .relative_deadline_ticks()
+                        .saturating_sub((*rt_thread).runtime),
                 );
                 (*ktimer_entity).reset_links();
                 queue.insert(ktimer_entity);
@@ -878,7 +514,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
         if !entity.is_null() && (*entity).is_expired_at(queue.now_ticks()) {
             queue.remove(entity);
             if is_cfs_ktimer(entity) {
-                (*entity).set_expire_after(queue.now_ticks(), cfs_period_ticks(entity));
+                (*entity).set_expire_after(queue.now_ticks(), (*entity).period_ticks());
             } else {
                 let rt_thread_ctx = (*KTimerEntity::container_of(entity)).thread_ctx();
                 let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(rt_thread_ctx));
@@ -887,7 +523,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
                     record_rt_deadline_miss(queue, entity, rt_thread);
                 }
                 (*rt_thread).runtime = 0;
-                set_rt_next_deadline(entity, queue.now_ticks());
+                (*entity).set_expire_after(queue.now_ticks(), (*entity).relative_deadline_ticks());
             }
             queue.insert(entity);
 
@@ -924,6 +560,10 @@ pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueue
     unsafe { dequeue_ktimerq_to_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
+pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
+    unsafe { enqueue_ktimerq_from_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
+}
+
 pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         let thread_ptr = thread.as_ptr();
@@ -939,16 +579,12 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), Wai
         remove_wait_thread(thread);
 
         (*thread_ptr).set_state(ThreadState::Ready);
-        crate::trace::record_wakeup(thread_ptr);
+        crate::diagnostics::trace::record_wakeup(thread_ptr);
         reinsert_ktimer(ktimer_entity);
         program_wait_ktimer();
 
         Ok(())
     })
-}
-
-pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
-    unsafe { enqueue_ktimerq_from_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
 pub fn next_ktimer_reload() -> Option<u32> {
@@ -1160,7 +796,7 @@ fn wait_ktimer() -> *mut KTimerEntity {
     unsafe { ptr::addr_of_mut!(WAIT_KTIMER.entity) }
 }
 
-unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
+pub(crate) unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
     unsafe {
         if is_cfs_ktimer(entity) {
             (*ptr::addr_of_mut!(CFS_KTIMER)).name
@@ -1170,45 +806,6 @@ unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
             (*KTimerEntity::container_of(entity.cast_mut())).name
         }
     }
-}
-
-unsafe fn ktimer_name_or_none(entity: *const KTimerEntity) -> &'static str {
-    if entity.is_null() {
-        "<none>"
-    } else {
-        unsafe { ktimer_name(entity) }
-    }
-}
-
-fn ktimer_kind_name(entity: *const KTimerEntity) -> &'static str {
-    if is_cfs_ktimer(entity) {
-        "cfs"
-    } else if is_wait_ktimer(entity) {
-        "wait"
-    } else {
-        "rt"
-    }
-}
-
-fn thread_state_name(state: ThreadState) -> &'static str {
-    match state {
-        ThreadState::Ready => "Ready",
-        ThreadState::Running => "Running",
-        ThreadState::Waiting => "Waiting",
-    }
-}
-
-fn sync_type_name(waitevt: Option<SyncType>) -> &'static str {
-    match waitevt {
-        Some(SyncType::BinarySemaphore) => "binary-semaphore",
-        Some(SyncType::CountingSemaphore) => "counting-semaphore",
-        Some(SyncType::Mutex) => "mutex",
-        None => "none",
-    }
-}
-
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
 }
 
 pub(crate) unsafe fn yield_ktimer(
@@ -1238,7 +835,7 @@ unsafe fn yield_ktimer_in_queue(
         if is_cfs_ktimer(entity) {
             (*entity).set_expire_after(
                 queue.now_ticks().saturating_add(u64::from(elapsed)),
-                cfs_period_ticks(entity).saturating_sub(elapsed),
+                (*entity).period_ticks().saturating_sub(elapsed),
             );
         } else {
             let current_rt_thread_ctx = (*KTimerEntity::container_of(entity)).thread_ctx();
@@ -1248,10 +845,11 @@ unsafe fn yield_ktimer_in_queue(
             (*current_rt_thread).runtime = (*current_rt_thread).runtime.saturating_add(elapsed);
             record_rt_budget_overrun(entity, current_rt_thread);
 
-            set_rt_next_release_after_runtime(
-                entity,
+            (*entity).set_expire_after(
                 queue.now_ticks().saturating_add(u64::from(elapsed)),
-                (*current_rt_thread).runtime,
+                (*entity)
+                    .period_ticks()
+                    .saturating_sub((*current_rt_thread).runtime),
             );
             if reset_runtime {
                 (*current_rt_thread).runtime = 0;
@@ -1290,7 +888,7 @@ unsafe fn scheduler_timer_reload_for_entity(
         let reload = if is_cfs_ktimer(entity) {
             let ticks = (*entity)
                 .remaining_at(queue.now_ticks())
-                .min(cfs_execution_ticks(entity));
+                .min((*entity).relative_deadline_ticks());
             programmable_reload_from_ticks(ticks)
         } else {
             let raw_reload = (*entity)
@@ -1469,12 +1067,12 @@ impl KTimerQueue {
                     if (*expired).is_active() {
                         (*expired).set_expire_after(
                             self.now_ticks,
-                            cfs_period_ticks(expired).saturating_sub(elapsed),
+                            (*expired).period_ticks().saturating_sub(elapsed),
                         );
                         (*expired).set_active(false);
                         self.insert(expired);
                     } else {
-                        (*expired).set_expire_after(self.now_ticks, cfs_period_ticks(expired));
+                        (*expired).set_expire_after(self.now_ticks, (*expired).period_ticks());
                         (*expired).set_active(true);
                         self.insert(expired);
                     }
@@ -1486,7 +1084,8 @@ impl KTimerQueue {
                         record_rt_deadline_miss(self, expired, rt_thread);
                     }
                     (*rt_thread).runtime = 0;
-                    set_rt_next_deadline(expired, self.now_ticks);
+                    (*expired)
+                        .set_expire_after(self.now_ticks, (*expired).relative_deadline_ticks());
                     (*expired).set_active(true);
                     self.insert(expired);
                 }

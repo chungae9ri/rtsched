@@ -108,7 +108,7 @@ unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
     unsafe {
         let next_thread_ptr = next_thread.as_ptr();
 
-        crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread_ptr);
+        crate::diagnostics::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread_ptr);
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != next_thread_ptr
@@ -130,7 +130,7 @@ unsafe fn switch_to_idle_thread() {
             return;
         }
 
-        crate::trace::record_context_switch(CURRENT_THREAD_CTX, idle_thread_ptr);
+        crate::diagnostics::trace::record_context_switch(CURRENT_THREAD_CTX, idle_thread_ptr);
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != idle_thread_ptr
@@ -231,7 +231,7 @@ extern "C" fn schedule() {
                             "CFS_RUN_QUEUE.pop_first() returned the CURRENT_THREAD_CTX running thread"
                         );
                         if (*current_entity).vruntime > next_entity.vruntime {
-                            crate::trace::record_context_switch(
+                            crate::diagnostics::trace::record_context_switch(
                                 CURRENT_THREAD_CTX,
                                 next_thread_ptr,
                             );
@@ -268,7 +268,7 @@ extern "C" fn schedule() {
                     (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(current));
                 }
             }
-            crate::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
+            crate::diagnostics::trace::record_context_switch(CURRENT_THREAD_CTX, next_thread);
             (*next_thread_handle.as_ptr()).set_state(ThreadState::Running);
             CURRENT_THREAD_CTX = next_thread_handle.as_ptr();
             CURRENT_THREAD_IS_CFS = false;
@@ -311,7 +311,7 @@ pub fn handle_sched_tick() {
         #[cfg(feature = "sched-isr-timing")]
         {
             let after_dispatch_cycle = crate::arch::platform::dwt_cycle_count();
-            crate::trace::record_sched_tick_ktimer_timing(
+            crate::diagnostics::trace::record_sched_tick_ktimer_timing(
                 after_advance_cycle.wrapping_sub(ktimer_start_cycle),
                 after_dispatch_cycle.wrapping_sub(after_advance_cycle),
             );
@@ -324,7 +324,7 @@ pub fn handle_sched_tick() {
         update_next_ktimer(next_ktimer);
     }
 
-    crate::trace::arm_sched_tick_to_pendsv_sample();
+    crate::diagnostics::trace::arm_sched_tick_to_pendsv_sample();
     request_context_switch();
 }
 
