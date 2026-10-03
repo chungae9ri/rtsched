@@ -41,9 +41,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 mod arch;
 
-#[cfg(test)]
-pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Run `f` while scheduler globals are protected from interrupt or test-thread
 /// interleaving.
 ///
@@ -66,6 +63,10 @@ mod sched;
 mod sync;
 mod thread;
 mod waitq;
+
+#[cfg(not(target_arch = "arm"))]
+#[doc(hidden)]
+pub mod test_support;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
@@ -107,49 +108,3 @@ pub use diagnostics::trace::{
 };
 
 pub use waitq::{WaitQueueError, traverse_wait_queue_fn};
-
-#[cfg(all(test, not(target_arch = "arm")))]
-mod tests {
-    use super::critical_section;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::thread;
-
-    #[test]
-    fn host_critical_section_allows_nested_calls() {
-        let value = critical_section(|| critical_section(|| 42));
-
-        assert_eq!(value, 42);
-    }
-
-    #[test]
-    fn host_critical_section_serializes_parallel_threads() {
-        let in_section = Arc::new(AtomicBool::new(false));
-        let overlap_count = Arc::new(AtomicUsize::new(0));
-        let mut threads = Vec::new();
-
-        for _ in 0..8 {
-            let in_section = Arc::clone(&in_section);
-            let overlap_count = Arc::clone(&overlap_count);
-
-            threads.push(thread::spawn(move || {
-                for _ in 0..128 {
-                    critical_section(|| {
-                        if in_section.swap(true, Ordering::SeqCst) {
-                            overlap_count.fetch_add(1, Ordering::SeqCst);
-                        }
-
-                        thread::yield_now();
-                        in_section.store(false, Ordering::SeqCst);
-                    });
-                }
-            }));
-        }
-
-        for thread in threads {
-            thread.join().unwrap();
-        }
-
-        assert_eq!(overlap_count.load(Ordering::SeqCst), 0);
-    }
-}

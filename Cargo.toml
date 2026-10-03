@@ -16,6 +16,7 @@ include = [
     "/README.md",
     "/examples/**",
     "/src/**",
+    "/tests/**",
 ]
 
 [lib]
