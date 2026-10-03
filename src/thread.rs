@@ -17,7 +17,7 @@ use crate::clock::ticks_per_ms;
 use crate::critical_section;
 use crate::ktimer::{
     CFS_KTIMER, KTimerEntity, RtKTimer, dequeue_ktimerq_to_waitq,
-    elapsed_ticks_since_current_reload, enqueue_ktimer, ktimer_now_ticks, update_next_ktimer,
+    elapsed_ticks_since_current_reload, enqueue_ktimer, update_next_ktimer, with_ktimer_queue,
     yield_ktimer,
 };
 use crate::runq::{SchedEntity, dequeue_runq_to_waitq, enqueue_thread};
@@ -439,7 +439,8 @@ impl ThreadRef<'_> {
 }
 
 fn wait_info_from_entity(entity: &WaitEntity) -> (u32, Option<SyncType>) {
-    (entity.remaining_at(ktimer_now_ticks()), entity.waitevt)
+    let now_ticks = with_ktimer_queue(|queue| queue.now_ticks());
+    (entity.remaining_at(now_ticks), entity.waitevt)
 }
 
 /// Scheduler-class-specific initialization for concrete thread control blocks.
@@ -1029,7 +1030,8 @@ pub fn msleepyi(msec: u32) {
             ThreadKind::Rt => rt_wait_entity(current_thread),
             ThreadKind::Idle => return,
         };
-        (*wait_entity).set_wake_after(ktimer_now_ticks(), msec.saturating_mul(ticks_per_ms()));
+        let now_ticks = with_ktimer_queue(|queue| queue.now_ticks());
+        (*wait_entity).set_wake_after(now_ticks, msec.saturating_mul(ticks_per_ms()));
         (*wait_entity).waitevt = None;
 
         if CURRENT_THREAD_IS_CFS {
