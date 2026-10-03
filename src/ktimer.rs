@@ -556,14 +556,6 @@ pub(crate) fn dequeue_ktimerq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQ
     })
 }
 
-pub fn dequeue_rt_thread_to_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
-    unsafe { dequeue_ktimerq_to_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
-}
-
-pub fn enqueue_rt_thread_from_waitq(thread: &mut RtThread) -> Result<(), WaitQueueError> {
-    unsafe { enqueue_ktimerq_from_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
-}
-
 pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         let thread_ptr = thread.as_ptr();
@@ -588,7 +580,10 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), Wai
 }
 
 pub fn next_ktimer_reload() -> Option<u32> {
-    critical_section(|| unsafe { (*KTIMER_QUEUE.get()).next_reload() })
+    critical_section(|| unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        scheduler_timer_reload_for_entity(queue, queue.first())
+    })
 }
 
 pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
@@ -714,45 +709,6 @@ pub(crate) unsafe fn set_thread_scheduler_expire_at(thread: ThreadHandle, expire
     });
 }
 
-pub fn traverse_ktimer_queue() {
-    critical_section(|| unsafe {
-        let queue = &*KTIMER_QUEUE.get();
-        let mut entity = queue.first();
-
-        crate::rtsched_println!("ktimer queue:");
-        while !entity.is_null() {
-            crate::rtsched_println!(
-                "{} ktimer's remaining={}, active={}",
-                ktimer_name(entity),
-                (*entity).remaining_at(queue.now_ticks()),
-                (*entity).is_active()
-            );
-            entity = queue.next(entity);
-        }
-    });
-}
-
-/// Traverse the ktimer queue and invoke `f` for each ktimer with its name
-/// and remaining ticks. This is similar to `traverse_ktimer_queue` but allows the
-/// caller to handle formatting/output (for example, writing to UART).
-pub fn traverse_ktimer_queue_fn<F>(mut f: F)
-where
-    F: FnMut(&'static str, u32),
-{
-    critical_section(|| unsafe {
-        let queue = &*KTIMER_QUEUE.get();
-        let mut entity = queue.first();
-
-        while !entity.is_null() {
-            f(
-                ktimer_name(entity),
-                (*entity).remaining_at(queue.now_ticks()),
-            );
-            entity = queue.next(entity);
-        }
-    });
-}
-
 /// Return whether the named kernel timer is currently active.
 ///
 /// Returns `false` when no timer with the given name exists.
@@ -776,24 +732,16 @@ pub(crate) fn next_ktimer() -> *mut KTimerEntity {
     critical_section(|| unsafe { NEXT_KTIMER })
 }
 
-pub(crate) fn ktimer_now_ticks() -> u64 {
-    critical_section(|| unsafe { (*KTIMER_QUEUE.get()).now_ticks() })
+pub(crate) fn with_ktimer_queue<R>(f: impl FnOnce(&KTimerQueue) -> R) -> R {
+    critical_section(|| unsafe { f(&*KTIMER_QUEUE.get()) })
 }
 
 pub(crate) fn is_cfs_ktimer(entity: *const KTimerEntity) -> bool {
-    !entity.is_null() && entity == cfs_ktimer().cast_const()
+    !entity.is_null() && entity == unsafe { ptr::addr_of_mut!(CFS_KTIMER.entity).cast_const() }
 }
 
 pub(crate) fn is_wait_ktimer(entity: *const KTimerEntity) -> bool {
-    !entity.is_null() && entity == wait_ktimer().cast_const()
-}
-
-fn cfs_ktimer() -> *mut KTimerEntity {
-    unsafe { ptr::addr_of_mut!(CFS_KTIMER.entity) }
-}
-
-fn wait_ktimer() -> *mut KTimerEntity {
-    unsafe { ptr::addr_of_mut!(WAIT_KTIMER.entity) }
+    !entity.is_null() && entity == unsafe { ptr::addr_of_mut!(WAIT_KTIMER.entity).cast_const() }
 }
 
 pub(crate) unsafe fn ktimer_name(entity: *const KTimerEntity) -> &'static str {
@@ -903,14 +851,10 @@ unsafe fn scheduler_timer_reload_for_entity(
     }
 }
 
-unsafe fn next_scheduler_timer_reload(queue: &KTimerQueue) -> Option<u32> {
-    unsafe { scheduler_timer_reload_for_entity(queue, queue.first()) }
-}
-
 pub(crate) fn program_next_scheduler_timer() -> Option<u32> {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let reload = next_scheduler_timer_reload(queue)?;
+        let reload = scheduler_timer_reload_for_entity(queue, queue.first())?;
 
         debug_assert!((SCHEDULER_TIMER_RELOAD_MIN..=SCHEDULER_TIMER_RELOAD_MAX).contains(&reload));
         let _ = platform::program_scheduler_timer_reload(reload);
@@ -1023,8 +967,9 @@ impl KTimerQueue {
         }
     }
 
+    #[cfg(test)]
     pub fn next_reload(&self) -> Option<u32> {
-        unsafe { next_scheduler_timer_reload(self) }
+        unsafe { scheduler_timer_reload_for_entity(self, self.first()) }
     }
 
     pub fn advance_time(&mut self, elapsed: u32) {
@@ -1681,7 +1626,7 @@ mod tests {
             crate::sched::init_cfs(100, 25);
 
             let queue = &mut *KTIMER_QUEUE.get();
-            let cfs = cfs_ktimer();
+            let cfs = ptr::addr_of_mut!(CFS_KTIMER.entity);
             queue.remove(cfs);
             (*cfs).set_active(false);
             (*cfs).reset_links();
@@ -1705,7 +1650,7 @@ mod tests {
             crate::sched::init_cfs(100, 25);
 
             let queue = &mut *KTIMER_QUEUE.get();
-            let cfs = cfs_ktimer();
+            let cfs = ptr::addr_of_mut!(CFS_KTIMER.entity);
             queue.remove(cfs);
             (*cfs).set_expire_at(100);
             (*cfs).set_active(false);
@@ -1821,7 +1766,7 @@ mod tests {
 
         unsafe {
             CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
-            let cfs = cfs_ktimer();
+            let cfs = ptr::addr_of_mut!(CFS_KTIMER.entity);
             (*cfs).set_active(false);
             queue.insert(cfs);
 
@@ -2003,15 +1948,16 @@ mod tests {
 
             assert!((*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
 
-            assert!(dequeue_rt_thread_to_waitq(&mut rt).is_ok());
+            let handle = thread_handle(&mut rt.thread);
+
+            assert!(dequeue_ktimerq_to_waitq(handle).is_ok());
 
             assert!(rt.thread.state == ThreadState::Waiting);
             assert!(!(*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
-            let handle = thread_handle(&mut rt.thread);
             assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
             assert!(ptr::eq(rt_ktimer_entity(handle), ktimer.entity_mut()));
 
-            assert!(enqueue_rt_thread_from_waitq(&mut rt).is_ok());
+            assert!(enqueue_ktimerq_from_waitq(handle).is_ok());
 
             assert!(rt.thread.state == ThreadState::Ready);
             assert!(

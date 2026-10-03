@@ -86,11 +86,9 @@ pub use arch::cm::platform::{
     init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread,
 };
 
-pub use ktimer::{
-    RtKTimer, RtTiming, dequeue_rt_thread_to_waitq, enqueue_rt_thread_from_waitq,
-    init_ktimer_queue, is_active_ktimer, next_ktimer_reload, traverse_ktimer_queue,
-    traverse_ktimer_queue_fn,
-};
+pub use ktimer::{RtKTimer, RtTiming, init_ktimer_queue, is_active_ktimer, next_ktimer_reload};
+
+pub use diagnostics::ktimer::{traverse_ktimer_queue, traverse_ktimer_queue_fn};
 
 pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
 

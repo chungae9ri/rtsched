@@ -1,16 +1,55 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
-//! Diagnostic output helpers for ktimer deadline misses.
+//! Diagnostic helpers for ktimer queue inspection and deadline misses.
 
 use core::ptr;
 
-use crate::ktimer::{KTimerEntity, KTimerQueue, is_cfs_ktimer, is_wait_ktimer, ktimer_name};
+use crate::ktimer::{
+    KTimerEntity, KTimerQueue, is_cfs_ktimer, is_wait_ktimer, ktimer_name, with_ktimer_queue,
+};
 use crate::sync::SyncType;
 use crate::thread::{
     CfsThread, RtThread, ThreadCtx, ThreadHandle, ThreadRef, ThreadState, cfs_thread_from_handle,
     rt_ktimer_entity, rt_thread_from_handle,
 };
+
+pub fn traverse_ktimer_queue() {
+    with_ktimer_queue(|queue| unsafe {
+        let mut entity = queue.first();
+
+        crate::rtsched_println!("ktimer queue:");
+        while !entity.is_null() {
+            crate::rtsched_println!(
+                "{} ktimer's remaining={}, active={}",
+                ktimer_name(entity),
+                (*entity).remaining_at(queue.now_ticks()),
+                (*entity).is_active()
+            );
+            entity = queue.next(entity);
+        }
+    });
+}
+
+/// Traverse the ktimer queue and invoke `f` for each ktimer with its name
+/// and remaining ticks. This is similar to `traverse_ktimer_queue` but allows the
+/// caller to handle formatting/output (for example, writing to UART).
+pub fn traverse_ktimer_queue_fn<F>(mut f: F)
+where
+    F: FnMut(&'static str, u32),
+{
+    with_ktimer_queue(|queue| unsafe {
+        let mut entity = queue.first();
+
+        while !entity.is_null() {
+            f(
+                ktimer_name(entity),
+                (*entity).remaining_at(queue.now_ticks()),
+            );
+            entity = queue.next(entity);
+        }
+    });
+}
 
 pub(crate) unsafe fn print_rt_deadline_miss_diagnostics(
     queue: &KTimerQueue,
