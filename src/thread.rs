@@ -234,7 +234,7 @@ impl<const N: usize> AlignedStack<N> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SchedInfo {
+pub struct CfsSchedInfo {
     /// CFS priority. Must be non-zero; lower numeric values are favored.
     pub priority: u32,
     /// Raw execution ticks accumulated by the CFS scheduler.
@@ -355,9 +355,9 @@ impl CfsThread {
     }
 
     /// Return a copy of this CFS thread's scheduling metrics.
-    pub fn sched_info(&self) -> SchedInfo {
+    pub fn sched_info(&self) -> CfsSchedInfo {
         let entity = self.sched_entity();
-        SchedInfo {
+        CfsSchedInfo {
             priority: entity.priority,
             sched_tick_cnt: entity.sched_tick_cnt(),
             vruntime: entity.vruntime(),

@@ -70,7 +70,7 @@ pub mod test_support;
 
 /// Re-exports of core scheduler primitives for convenient use in application code.
 pub use thread::{
-    AlignedStack, CfsThread, CfsThreadBuilder, IdleThread, RtThread, RtThreadBuilder, SchedInfo,
+    AlignedStack, CfsSchedInfo, CfsThread, CfsThreadBuilder, IdleThread, RtThread, RtThreadBuilder,
     ThreadCtx, ThreadEntry, ThreadHandle, ThreadId, ThreadKind, ThreadRef, ThreadSpawnError,
     ThreadStart, ThreadState, current_rt_thread_runtime, current_thread, current_thread_id,
     msleepyi, set_rt_thread_start_time, yieldyi,
