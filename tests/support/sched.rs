@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use crate::diagnostics::sched::traverse_idle_thread_fn;
 use crate::ktimer::{
     RtKTimer, clear_elapsed_ticks_since_last_interrupt_for_test, init_ktimer_queue,
     set_elapsed_ticks_since_last_interrupt_for_test,

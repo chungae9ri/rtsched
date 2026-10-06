@@ -47,6 +47,13 @@ fn reset_wait_queue() {
     }
 }
 
+unsafe fn reset_global_ktimer_queue() {
+    unsafe {
+        ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
+        ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
+    }
+}
+
 fn collect_deadlines_at(queue: &KTimerQueue) -> Vec<u64> {
     let mut deadlines = Vec::new();
     let mut entity = queue.first();
@@ -526,119 +533,145 @@ pub fn rt_timing_constructor_separates_period_deadline_and_budget() {
 pub fn rt_yield_marks_timer_inactive_and_preserves_remaining_period() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let mut queue = KTimerQueue::new();
     let mut rt = rt_thread("rt");
     let mut ktimer = RtKTimer::new(100, ptr::null_mut(), "rt");
     let mut active_later = KTimerEntity::new(200);
 
     unsafe {
+        reset_global_ktimer_queue();
         ktimer.init_rt_ktimer(&mut rt.thread);
-        queue.insert(ktimer.entity_mut());
-        queue.insert(&mut active_later);
+        {
+            let queue = &mut *KTIMER_QUEUE.get();
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+        }
 
-        let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 20, false);
+        let next = yield_ktimer(ktimer.entity_mut(), 20, false);
         assert!(ptr::eq(next, &active_later));
     }
 
     assert_eq!(rt.runtime, 20);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 100);
-    assert_eq!(queue.now_ticks(), 20);
-    assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 80);
+    unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        assert_eq!(queue.now_ticks(), 20);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 80);
+    }
 }
 
 pub fn rt_yield_with_reset_runtime_finishes_current_job_window() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let mut queue = KTimerQueue::new();
     let mut rt = rt_thread("rt");
     let mut ktimer = RtKTimer::new(60, ptr::null_mut(), "rt");
     let mut active_later = KTimerEntity::new(120);
 
     unsafe {
+        reset_global_ktimer_queue();
         ktimer.init_rt_ktimer(&mut rt.thread);
-        queue.insert(ktimer.entity_mut());
-        queue.insert(&mut active_later);
+        {
+            let queue = &mut *KTIMER_QUEUE.get();
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+        }
 
-        let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
+        let next = yield_ktimer(ktimer.entity_mut(), 15, true);
         assert!(ptr::eq(next, &active_later));
     }
 
     assert_eq!(rt.runtime, 0);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 60);
-    assert_eq!(queue.now_ticks(), 15);
-    assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
+    unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        assert_eq!(queue.now_ticks(), 15);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
+    }
 }
 
 pub fn rt_yield_without_active_timers_returns_null() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let mut queue = KTimerQueue::new();
     let mut rt = rt_thread("rt");
     let mut ktimer = RtKTimer::new(60, ptr::null_mut(), "rt");
 
     unsafe {
+        reset_global_ktimer_queue();
         CFS_KTIMER = CfsKTimer::new(100, 25, "cfs");
         let cfs = ptr::addr_of_mut!(CFS_KTIMER.entity);
         (*cfs).set_active(false);
-        queue.insert(cfs);
+        {
+            let queue = &mut *KTIMER_QUEUE.get();
+            queue.insert(cfs);
 
-        ktimer.init_rt_ktimer(&mut rt.thread);
-        queue.insert(ktimer.entity_mut());
+            ktimer.init_rt_ktimer(&mut rt.thread);
+            queue.insert(ktimer.entity_mut());
+        }
 
-        let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, true);
+        let next = yield_ktimer(ktimer.entity_mut(), 15, true);
 
         assert!(next.is_null());
         assert!(!(*cfs).is_active());
-        assert!(queue.contains(cfs.cast_const()));
+        assert!((*KTIMER_QUEUE.get()).contains(cfs.cast_const()));
     }
 
     assert_eq!(rt.runtime, 0);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 60);
-    assert_eq!(queue.now_ticks(), 15);
+    unsafe {
+        assert_eq!((*KTIMER_QUEUE.get()).now_ticks(), 15);
+    }
 }
 
 pub fn rt_yield_uses_period_for_next_release_not_relative_deadline() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let mut queue = KTimerQueue::new();
     let mut rt = rt_thread("rt");
     let mut ktimer = RtKTimer::new_with_timing(RtTiming::new(100, 40, 100), ptr::null_mut(), "rt");
     let mut active_later = KTimerEntity::new(200);
 
     unsafe {
+        reset_global_ktimer_queue();
         ktimer.init_rt_ktimer(&mut rt.thread);
-        queue.insert(ktimer.entity_mut());
-        queue.insert(&mut active_later);
+        {
+            let queue = &mut *KTIMER_QUEUE.get();
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+        }
 
-        let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, false);
+        let next = yield_ktimer(ktimer.entity_mut(), 15, false);
         assert!(ptr::eq(next, &active_later));
     }
 
     assert_eq!(rt.runtime, 15);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 100);
-    assert_eq!(queue.now_ticks(), 15);
-    assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 85);
+    unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        assert_eq!(queue.now_ticks(), 15);
+        assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 85);
+    }
     assert_eq!(ktimer.miss_cnt, 0);
 }
 
 pub fn rt_yield_records_budget_overrun_independent_of_deadline() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let mut queue = KTimerQueue::new();
     let mut rt = rt_thread("rt");
     let mut ktimer = RtKTimer::new_with_timing(RtTiming::new(100, 80, 10), ptr::null_mut(), "rt");
     let mut active_later = KTimerEntity::new(200);
 
     unsafe {
+        reset_global_ktimer_queue();
         ktimer.init_rt_ktimer(&mut rt.thread);
-        queue.insert(ktimer.entity_mut());
-        queue.insert(&mut active_later);
+        {
+            let queue = &mut *KTIMER_QUEUE.get();
+            queue.insert(ktimer.entity_mut());
+            queue.insert(&mut active_later);
+        }
 
-        let next = yield_ktimer_in_queue(&mut queue, ktimer.entity_mut(), 15, false);
+        let next = yield_ktimer(ktimer.entity_mut(), 15, false);
         assert!(ptr::eq(next, &active_later));
     }
 
