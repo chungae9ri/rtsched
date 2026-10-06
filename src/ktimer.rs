@@ -762,21 +762,11 @@ pub(crate) unsafe fn yield_ktimer(
     reset_runtime: bool,
 ) -> *mut KTimerEntity {
     critical_section(|| unsafe {
-        let queue: &mut KTimerQueue = &mut *KTIMER_QUEUE.get();
-        yield_ktimer_in_queue(queue, entity, elapsed, reset_runtime)
-    })
-}
-
-unsafe fn yield_ktimer_in_queue(
-    queue: &mut KTimerQueue,
-    entity: *mut KTimerEntity,
-    elapsed: u32,
-    reset_runtime: bool,
-) -> *mut KTimerEntity {
-    unsafe {
         if entity.is_null() {
             return ptr::null_mut();
         }
+
+        let queue: &mut KTimerQueue = &mut *KTIMER_QUEUE.get();
 
         queue.remove(entity);
 
@@ -808,7 +798,7 @@ unsafe fn yield_ktimer_in_queue(
         queue.advance_time(elapsed);
         queue.insert(entity);
         queue.first_active()
-    }
+    })
 }
 
 fn writable_reload(reload: u32) -> u32 {

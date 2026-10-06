@@ -54,7 +54,6 @@ fn mark_scheduler_started() {
 /// links and loses scheduler accounting.
 pub unsafe fn init_cfs(period_ticks: u32, exec_ticks: u32) {
     unsafe {
-        reset_scheduler_started();
         init_cfs_rq();
         IDLE_THREAD_CTX = ptr::null_mut();
         CFS_KTIMER = CfsKTimer::new(period_ticks, exec_ticks, "cfs");
@@ -91,17 +90,6 @@ pub unsafe fn register_idle_thread(thread: ThreadHandle) {
 
 pub(crate) unsafe fn is_idle_thread(thread: *const ThreadCtx) -> bool {
     unsafe { !thread.is_null() && thread == IDLE_THREAD_CTX.cast_const() }
-}
-
-pub fn traverse_idle_thread_fn<F>(mut f: F)
-where
-    F: FnMut(&ThreadCtx),
-{
-    crate::critical_section(|| unsafe {
-        if !IDLE_THREAD_CTX.is_null() {
-            f(&*IDLE_THREAD_CTX);
-        }
-    });
 }
 
 unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
@@ -181,18 +169,21 @@ extern "C" fn schedule() {
         let elapsed = elapsed_ticks_since_last_interrupt();
 
         // The scheduler logic is as follows:
-        // - If the CURRENT_THREAD_CTX is CFS, update its vruntime based on the elapsed
-        //   ticks and its inverse-numeric priority. Lower numeric priority values are
-        //   favored because they accumulate vruntime more slowly.
-        // - If the next expired ktimer is for a CFS thread and current thread is
-        //   CFS thread, compare its vruntime with the CURRENT_THREAD_CTX's vruntime
-        //   to decide whether to preempt.
-        // - If the next expired ktimer is for a CFS thread and current thread is
-        //   RT thread, switch to the left-most CFS thread.
-        // - If the next expired ktimer is for an RT thread and current thread is
-        //   CFS thread, insert current to CFS runq and switch to next RT thread.
-        // - If the next expired ktimer is for an RT thread and current thread is
-        //   RT thread, preempt the CURRENT_THREAD_CTX with next RT thread.
+        // - Account elapsed time to the current running, non-idle CFS thread.
+        //   Lower numeric priority values are favored because they accumulate
+        //   vruntime more slowly.
+        // - If there is no next active ktimer, or the next ktimer is an inactive
+        //   CFS timer, fall back to the idle thread after requeueing a runnable
+        //   current CFS thread.
+        // - If the next ktimer is the active CFS timer, pop the left-most CFS
+        //   run-queue entity. A waiting/idle current thread or an RT current
+        //   thread switches to that CFS thread directly. A running CFS current
+        //   thread is preempted only when the queued entity has lower vruntime;
+        //   otherwise the queued entity is reinserted and the current thread
+        //   keeps running.
+        // - If the next ktimer belongs to an RT thread, switch to that RT
+        //   thread. A non-waiting outgoing thread becomes Ready, and a non-idle
+        //   outgoing CFS thread is requeued before the switch.
         if CURRENT_THREAD_IS_CFS
             && (*CURRENT_THREAD_CTX).state == ThreadState::Running
             && !is_idle_thread(CURRENT_THREAD_CTX)
@@ -280,16 +271,16 @@ extern "C" fn schedule() {
 
 /// Handle one scheduler tick and request ktimer dispatch.
 ///
-/// A scheduler tick means different things for each KTimer type:
-/// - For CFS KTimer, it means the current CFS KTimer has exhausted its execution time slice,
-///   and does the context switch to the thread of next earliest deadline KTimer (KTimer of
-///   RT thread, CFS_KTIMER or WAIT_KTIMER) that should preempt the current thread.
-/// - For wait KTimer, it means there is a WAITING thread in the WAIT_QUEUE that needs to be
-///   woken up and moved to the runq and should be scheduled.
-/// - For RT KTimer, if its active is true, it means current RT thread misses its deadline.
-///   If its active is false, current RT thread finishes its job before its deadline.
-///   Active RT timers are re-armed with their relative deadline; inactive RT timers
-///   are reactivated at their next period release.
+/// A scheduler tick has a different meaning for each KTimer type:
+/// - For the CFS KTimer, the current CFS time slice has expired. The scheduler
+///   may switch to the thread selected by the next earliest-deadline KTimer
+///   (an RT timer, the CFS timer, or the wait timer).
+/// - For the wait KTimer, at least one waiting thread may be ready to wake. The
+///   thread is moved from `WAIT_QUEUE` to the run queue for `CfsThread`, or back
+///   to `KTIMER_QUEUE` for `RtThread`, so it can be scheduled.
+/// - For an RT KTimer, an active timer means the RT thread missed its deadline.
+///   An inactive timer means the RT thread completed its previous job before
+///   the deadline, and this timer interrupt releases it for the next period.
 pub fn handle_sched_tick() {
     if !scheduler_started() {
         return;

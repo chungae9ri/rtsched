@@ -93,7 +93,9 @@ pub use diagnostics::ktimer::{traverse_ktimer_queue, traverse_ktimer_queue_fn};
 
 pub use runq::{dequeue_cfs_thread_to_waitq, traverse_run_queue_fn};
 
-pub use sched::{handle_sched_tick, init_cfs, register_idle_thread, traverse_idle_thread_fn};
+pub use sched::{handle_sched_tick, init_cfs, register_idle_thread};
+
+pub use diagnostics::sched::traverse_idle_thread_fn;
 
 pub use sync::{
     BinarySemaphore, CountingSemaphore, Mutex, MutexError, MutexGuard, SemaphoreError, SyncType,
