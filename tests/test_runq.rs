@@ -21,11 +21,6 @@ fn traverse_run_queue_includes_running_cfs_thread_first() {
 }
 
 #[test]
-fn dequeue_thread_removes_ready_thread_and_saturates_priority_sum() {
-    runq::dequeue_thread_removes_ready_thread_and_saturates_priority_sum();
-}
-
-#[test]
 fn dequeue_runq_to_waitq_moves_thread_between_queues() {
     runq::dequeue_runq_to_waitq_moves_thread_between_queues();
 }

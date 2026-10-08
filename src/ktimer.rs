@@ -398,34 +398,6 @@ unsafe fn is_real_rt_deadline_miss(entity: *mut KTimerEntity, rt_thread: *mut Rt
     unsafe { (*rt_thread).runtime > (*entity).relative_deadline_ticks() }
 }
 
-unsafe fn record_rt_deadline_miss(
-    queue: &KTimerQueue,
-    entity: *mut KTimerEntity,
-    rt_thread: *mut RtThread,
-) {
-    unsafe {
-        let thread_name = (*rt_thread).thread.name;
-        let runtime = (*rt_thread).runtime;
-        let relative_deadline = (*entity).relative_deadline_ticks();
-
-        crate::diagnostics::trace::record_deadline_miss(
-            ptr::addr_of!((*rt_thread).thread),
-            runtime,
-            relative_deadline,
-        );
-        let rt_ktimer = KTimerEntity::container_of(entity);
-        (*rt_ktimer).miss_cnt = (*rt_ktimer).miss_cnt.saturating_add(1);
-        crate::rtsched_println!(
-            "Deadline miss in thread '{}': timer expired at relative deadline {} ticks (runtime {} ticks)",
-            thread_name,
-            relative_deadline,
-            runtime
-        );
-        crate::diagnostics::ktimer::print_rt_deadline_miss_diagnostics(queue, entity, rt_thread);
-        panic!("RT deadline miss in thread '{}'", thread_name);
-    }
-}
-
 pub(crate) unsafe fn program_wait_ktimer() {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
@@ -520,7 +492,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
                 let rt_thread = rt_thread_from_handle(ThreadHandle::from_thread_ctx(rt_thread_ctx));
 
                 if is_real_rt_deadline_miss(entity, rt_thread) {
-                    record_rt_deadline_miss(queue, entity, rt_thread);
+                    crate::diagnostics::ktimer::record_rt_deadline_miss(queue, entity, rt_thread);
                 }
                 (*rt_thread).runtime = 0;
                 (*entity).set_expire_after(queue.now_ticks(), (*entity).relative_deadline_ticks());
@@ -1016,7 +988,9 @@ impl KTimerQueue {
                     let rt_thread =
                         rt_thread_from_handle(ThreadHandle::from_thread_ctx(thread_ctx));
                     if (*expired).is_active() && is_real_rt_deadline_miss(expired, rt_thread) {
-                        record_rt_deadline_miss(self, expired, rt_thread);
+                        crate::diagnostics::ktimer::record_rt_deadline_miss(
+                            self, expired, rt_thread,
+                        );
                     }
                     (*rt_thread).runtime = 0;
                     (*expired)

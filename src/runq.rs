@@ -8,11 +8,7 @@ use core::ptr;
 use crate::critical_section;
 use crate::ktimer::program_wait_ktimer;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
-use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
-use crate::thread::{
-    CfsThread, ThreadHandle, ThreadState, cfs_sched_entity, cfs_thread_from_handle,
-    thread_handle_from_cfs_sched_entity,
-};
+use crate::thread::{ThreadHandle, ThreadState, cfs_sched_entity};
 use crate::waitq::{WaitQueueError, insert_wait_thread};
 
 pub(crate) static CFS_RUN_QUEUE: RunQueue = RunQueue::new();
@@ -162,69 +158,6 @@ unsafe impl RBTreeNode for SchedEntity {
     }
 }
 
-/// Traverse the CFS scheduler-visible threads, including the running CFS thread.
-///
-/// Pass `None` to get the CURRENT_THREAD_CTX running thread when it is a CFS
-/// thread; otherwise this returns the first queued CFS thread. Pass the
-/// previously returned thread to get the next entry. After the running CFS
-/// thread, traversal continues through the run queue in ascending vruntime
-/// order. Returns `None` after the last queued CFS thread.
-///
-/// # Safety
-///
-/// The caller must ensure that any provided thread pointer still refers to a
-/// valid thread control block and that the run queue is not concurrently
-/// mutated in a way that invalidates the traversal step.
-pub(crate) unsafe fn traverse_run_queue(cursor: Option<ThreadHandle>) -> Option<ThreadHandle> {
-    unsafe {
-        let tree = &*CFS_RUN_QUEUE.get();
-        match cursor {
-            None => {
-                if CURRENT_THREAD_IS_CFS && !CURRENT_THREAD_CTX.is_null() {
-                    Some(ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX))
-                } else {
-                    let first = tree.first();
-                    if first.is_null() {
-                        None
-                    } else {
-                        Some(thread_handle_from_cfs_sched_entity(first))
-                    }
-                }
-            }
-            Some(thread) if thread.as_ptr() == CURRENT_THREAD_CTX => {
-                let first = tree.first();
-                if first.is_null() {
-                    None
-                } else {
-                    Some(thread_handle_from_cfs_sched_entity(first))
-                }
-            }
-            Some(thread) => {
-                let next = tree.next(cfs_sched_entity(thread));
-                if next.is_null() {
-                    None
-                } else {
-                    Some(thread_handle_from_cfs_sched_entity(next))
-                }
-            }
-        }
-    }
-}
-
-/// Visit scheduler-visible CFS threads without exposing raw traversal cursors.
-pub fn traverse_run_queue_fn<F>(mut f: F)
-where
-    F: FnMut(&CfsThread),
-{
-    critical_section(|| unsafe {
-        let mut cursor = traverse_run_queue(None);
-        while let Some(thread) = cursor {
-            f(&*cfs_thread_from_handle(thread));
-            cursor = traverse_run_queue(Some(thread));
-        }
-    });
-}
-
 /// Reset the scheduler run queue to an empty state.
 pub(crate) unsafe fn init_cfs_rq() {
     unsafe {
@@ -283,34 +216,6 @@ pub unsafe fn enqueue_thread(thread: ThreadHandle) {
     }
 }
 
-/// Remove a thread from the scheduler run queue if it is currently queued.
-///
-/// # Safety
-///
-/// `thread` must be non-null and must point to the `ThreadCtx` embedded in a
-/// live `CfsThread`. Callers must serialize removal against scheduler
-/// interrupts and other run-queue mutations.
-#[allow(dead_code)]
-pub unsafe fn dequeue_thread(thread: ThreadHandle) {
-    unsafe {
-        let thread_ptr = thread.as_ptr();
-        if (*thread_ptr).state == ThreadState::Ready {
-            let entity = cfs_sched_entity(thread);
-            let tree = &mut *CFS_RUN_QUEUE.get();
-            if tree.contains(entity.cast_const()) {
-                tree.remove(entity);
-                let priority_sum =
-                    (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);
-                *CFS_RUN_QUEUE.priority_sum() = priority_sum;
-            }
-        }
-    }
-}
-
-/// Since this is called from dispatch_expired, WAIT_KTIMER is already popped
-/// from the KTIMER_QUEUE, so calling program_wait_ktimer() at the end of this function
-/// will generate a program panic.
-///
 /// # Safety
 ///
 /// `thread` must be non-null, currently waiting, and must point to the
@@ -323,6 +228,8 @@ pub unsafe fn dequeue_thread(thread: ThreadHandle) {
 pub unsafe fn enqueue_runq_from_waitq(thread: ThreadHandle) {
     unsafe {
         let thread_ptr = thread.as_ptr();
+        debug_assert!((*thread_ptr).is_cfs(), "thread must be a CfsThread");
+
         let entity = cfs_sched_entity(thread);
         let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_add((*entity).priority);
         let tree = &mut *CFS_RUN_QUEUE.get();
@@ -358,6 +265,8 @@ pub unsafe fn enqueue_runq_from_waitq(thread: ThreadHandle) {
 pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     critical_section(|| unsafe {
         let thread_ptr = thread.as_ptr();
+        debug_assert!((*thread_ptr).is_cfs(), "thread must be a CfsThread");
+
         let entity = cfs_sched_entity(thread);
         // If the thread is Running, it is not in the runq.
         if (*thread_ptr).state == ThreadState::Ready {
@@ -372,10 +281,6 @@ pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueu
 
         Ok(())
     })
-}
-
-pub fn dequeue_cfs_thread_to_waitq(thread: &mut CfsThread) -> Result<(), WaitQueueError> {
-    unsafe { dequeue_runq_to_waitq(ThreadHandle::from_thread_ctx(thread.thread_ctx_mut())) }
 }
 
 #[cfg(not(target_arch = "arm"))]

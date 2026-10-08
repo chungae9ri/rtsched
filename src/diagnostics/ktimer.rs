@@ -51,7 +51,35 @@ where
     });
 }
 
-pub(crate) unsafe fn print_rt_deadline_miss_diagnostics(
+pub(crate) unsafe fn record_rt_deadline_miss(
+    queue: &KTimerQueue,
+    entity: *mut KTimerEntity,
+    rt_thread: *mut RtThread,
+) {
+    unsafe {
+        let thread_name = (*rt_thread).thread.name;
+        let runtime = (*rt_thread).runtime;
+        let relative_deadline = (*entity).relative_deadline_ticks();
+
+        crate::diagnostics::trace::record_deadline_miss(
+            ptr::addr_of!((*rt_thread).thread),
+            runtime,
+            relative_deadline,
+        );
+        let rt_ktimer = KTimerEntity::container_of(entity);
+        (*rt_ktimer).miss_cnt = (*rt_ktimer).miss_cnt.saturating_add(1);
+        crate::rtsched_println!(
+            "Deadline miss in thread '{}': timer expired at relative deadline {} ticks (runtime {} ticks)",
+            thread_name,
+            relative_deadline,
+            runtime
+        );
+        print_rt_deadline_miss_diagnostics(queue, entity, rt_thread);
+        panic!("RT deadline miss in thread '{}'", thread_name);
+    }
+}
+
+unsafe fn print_rt_deadline_miss_diagnostics(
     queue: &KTimerQueue,
     missed_entity: *mut KTimerEntity,
     missed_thread: *mut RtThread,
@@ -210,7 +238,7 @@ unsafe fn print_idle_thread_statistics() {
 fn print_cfs_thread_statistics_list() {
     crate::rtsched_println!("  cfs threads:");
     let mut saw_thread = false;
-    crate::runq::traverse_run_queue_fn(|thread| {
+    crate::diagnostics::runq::traverse_run_queue_fn(|thread| {
         saw_thread = true;
         print_cfs_thread_statistics("    ", "cfs", thread);
     });
