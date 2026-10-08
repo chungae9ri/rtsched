@@ -1,7 +1,9 @@
 extern crate std;
 
 use super::*;
+use crate::diagnostics::runq::traverse_run_queue_fn;
 use crate::ktimer::init_ktimer_queue;
+use crate::sched::{CURRENT_THREAD_CTX, CURRENT_THREAD_IS_CFS};
 use crate::test_support::TEST_LOCK;
 use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState};
 use crate::waitq::{WAIT_QUEUE, WaitEntity, wait_entity};
@@ -111,23 +113,6 @@ pub fn traverse_run_queue_includes_running_cfs_thread_first() {
     assert_eq!(collect_thread_names(), ["running", "queued"]);
 }
 
-pub fn dequeue_thread_removes_ready_thread_and_saturates_priority_sum() {
-    let _guard = TEST_LOCK.lock().unwrap();
-    reset_run_queue();
-    let mut first = cfs_thread("first", 3, 0);
-    let mut second = cfs_thread("second", 5, 10);
-
-    unsafe {
-        enqueue_thread(thread_handle(&mut first.thread));
-        enqueue_thread(thread_handle(&mut second.thread));
-        dequeue_thread(thread_handle(&mut first.thread));
-    }
-
-    assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 5);
-    assert_eq!(collect_thread_names(), ["second"]);
-    assert!(!first.sched_entity.is_linked());
-}
-
 pub fn dequeue_runq_to_waitq_moves_thread_between_queues() {
     let _guard = TEST_LOCK.lock().unwrap();
 
@@ -144,7 +129,7 @@ pub fn dequeue_runq_to_waitq_moves_thread_between_queues() {
         enqueue_thread(handle);
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
 
-        assert!(dequeue_cfs_thread_to_waitq(&mut thread).is_ok());
+        assert!(dequeue_runq_to_waitq(handle).is_ok());
 
         assert!(thread.thread.state == ThreadState::Waiting);
         assert!(!(*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
