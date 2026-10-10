@@ -250,7 +250,7 @@ fn print_cfs_thread_statistics_list() {
 fn print_wait_thread_statistics_list() {
     crate::rtsched_println!("  wait queue:");
     let mut saw_thread = false;
-    crate::waitq::traverse_wait_queue_fn(|thread| {
+    crate::diagnostics::waitq::traverse_wait_queue_fn(|thread| {
         saw_thread = true;
         match thread {
             ThreadRef::Cfs(thread) => {
