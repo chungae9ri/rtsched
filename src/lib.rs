@@ -109,4 +109,6 @@ pub use diagnostics::trace::{
     set_trace_fn, trace_counters,
 };
 
-pub use waitq::{WaitQueueError, traverse_wait_queue_fn};
+pub use diagnostics::waitq::traverse_wait_queue_fn;
+
+pub use waitq::WaitQueueError;

@@ -764,14 +764,20 @@ unsafe fn block_current_thread_on<T: SyncWaitObject>(
 
 unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
     unsafe {
-        while let Some(sync_entity) = waiters.pop_first() {
-            let thread = thread_handle_from_sync_entity(sync_entity as *mut SyncEntity);
-            if (*thread.as_ptr()).state == ThreadState::Waiting {
-                return Some(thread);
-            }
+        let sync_entity = waiters.pop_first()?;
+        let thread = thread_handle_from_sync_entity(sync_entity as *mut SyncEntity);
+        let state = (*thread.as_ptr()).state;
+
+        debug_assert_eq!(
+            state,
+            ThreadState::Waiting,
+            "sync waiter must remain in Waiting state"
+        );
+        if state != ThreadState::Waiting {
+            return None;
         }
 
-        None
+        Some(thread)
     }
 }
 

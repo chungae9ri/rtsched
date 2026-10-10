@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use crate::diagnostics::waitq::{traverse_wait_queue, traverse_wait_queue_fn};
 use crate::runq::SchedEntity;
 use crate::test_support::TEST_LOCK;
 use crate::thread::{CfsThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState};
