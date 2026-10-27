@@ -272,7 +272,6 @@ pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueu
         if (*thread_ptr).state == ThreadState::Ready {
             (*CFS_RUN_QUEUE.get()).remove(entity);
         }
-        (*thread_ptr).set_state(ThreadState::Waiting);
 
         insert_wait_thread(thread);
         let priority_sum = (*CFS_RUN_QUEUE.priority_sum()).saturating_sub((*entity).priority);

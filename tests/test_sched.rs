@@ -6,6 +6,11 @@ fn scheduler_started_latch_is_marked_explicitly() {
 }
 
 #[test]
+fn switching_to_cfs_rt_or_idle_preserves_suspended_outgoing_threads() {
+    sched::switching_to_cfs_rt_or_idle_preserves_suspended_outgoing_threads();
+}
+
+#[test]
 fn handle_sched_tick_ignores_queued_work_before_scheduler_start() {
     sched::handle_sched_tick_ignores_queued_work_before_scheduler_start();
 }

@@ -417,6 +417,7 @@ fn thread_state_name(state: ThreadState) -> &'static str {
         ThreadState::Ready => "Ready",
         ThreadState::Running => "Running",
         ThreadState::Waiting => "Waiting",
+        ThreadState::Suspended => "Suspended",
     }
 }
 

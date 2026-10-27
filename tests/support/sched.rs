@@ -120,6 +120,61 @@ pub fn scheduler_started_latch_is_marked_explicitly() {
     reset_scheduler_started();
 }
 
+pub fn switching_to_cfs_rt_or_idle_preserves_suspended_outgoing_threads() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for current_is_cfs in [false, true] {
+        for next_kind in [ThreadKind::Cfs, ThreadKind::Rt, ThreadKind::Idle] {
+            let mut current_cfs = cfs_thread("current_cfs", 1, 0, ThreadState::Suspended);
+            let mut current_rt = rt_thread("current_rt");
+            current_rt.thread.set_state(ThreadState::Suspended);
+            let mut next_cfs = cfs_thread("next_cfs", 1, 0, ThreadState::Ready);
+            let mut next_rt = rt_thread("next_rt");
+            next_rt.thread.set_state(ThreadState::Ready);
+            let mut rt_timer = RtKTimer::new(20, ptr::null_mut(), "next_rt");
+            let mut idle = idle_thread("idle", ThreadState::Ready);
+
+            unsafe {
+                let cfs_timer = reset_sched_state();
+                CURRENT_THREAD_CTX = if current_is_cfs {
+                    ptr::addr_of_mut!(current_cfs).cast::<ThreadCtx>()
+                } else {
+                    ptr::addr_of_mut!(current_rt).cast::<ThreadCtx>()
+                };
+                CURRENT_THREAD_IS_CFS = current_is_cfs;
+                let outgoing = CURRENT_THREAD_CTX;
+                register_idle_thread(thread_handle(ptr::addr_of_mut!(idle).cast::<ThreadCtx>()));
+                let (timer, next_thread) = match next_kind {
+                    ThreadKind::Cfs => {
+                        enqueue_ktimer(cfs_timer);
+                        let next = ptr::addr_of_mut!(next_cfs).cast::<ThreadCtx>();
+                        queue_cfs_thread(next);
+                        (cfs_timer, next)
+                    }
+                    ThreadKind::Rt => {
+                        let next = ptr::addr_of_mut!(next_rt).cast::<ThreadCtx>();
+                        rt_timer.init_rt_ktimer(next);
+                        let timer = rt_timer.entity_mut();
+                        enqueue_ktimer(timer);
+                        (timer, next)
+                    }
+                    ThreadKind::Idle => {
+                        (ptr::null_mut(), ptr::addr_of_mut!(idle).cast::<ThreadCtx>())
+                    }
+                };
+                schedule_for_test(timer, 0);
+                assert_eq!((*outgoing).state, ThreadState::Suspended);
+                let current = CURRENT_THREAD_CTX;
+                assert_eq!(current, next_thread);
+                assert_eq!((*next_thread).state, ThreadState::Running);
+                assert!((*CFS_RUN_QUEUE.get()).is_empty());
+                CURRENT_THREAD_CTX = ptr::null_mut();
+                CURRENT_THREAD_IS_CFS = false;
+                IDLE_THREAD_CTX = ptr::null_mut();
+            }
+        }
+    }
+}
+
 pub fn handle_sched_tick_ignores_queued_work_before_scheduler_start() {
     let _guard = TEST_LOCK.lock().unwrap();
 

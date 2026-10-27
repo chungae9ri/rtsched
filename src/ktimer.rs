@@ -401,12 +401,22 @@ unsafe fn is_real_rt_deadline_miss(entity: *mut KTimerEntity, rt_thread: *mut Rt
 pub(crate) unsafe fn program_wait_ktimer() {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
-        let wait_ktimer = ptr::addr_of_mut!(WAIT_KTIMER);
-        let wait_ktimer_entity = (*wait_ktimer).entity_mut();
+        // Keep the linked node's raw pointers valid across the unchanged-deadline path.
+        let wait_ktimer_entity = ptr::addr_of_mut!(WAIT_KTIMER.entity);
 
-        queue.remove(wait_ktimer_entity);
-        update_wait_ktimer_deadline(wait_ktimer_entity);
-        queue.insert(wait_ktimer_entity);
+        let first_wait = (*WAIT_QUEUE.get()).first();
+        let expire_at = if first_wait.is_null() {
+            KTIMER_EXPIRE_NEVER
+        } else {
+            (*first_wait).wake_at
+        };
+        if (*wait_ktimer_entity).expire_at() != expire_at {
+            queue.remove(wait_ktimer_entity);
+            (*wait_ktimer_entity).set_expire_at(expire_at);
+            (*wait_ktimer_entity).set_active(false);
+            queue.insert(wait_ktimer_entity);
+        }
+        // A wake can change the selected RT timer even when the wait deadline stays put.
         refresh_next_ktimer(queue);
     });
 }
@@ -519,8 +529,6 @@ pub(crate) fn dequeue_ktimerq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQ
         }
 
         remove_ktimer(ktimer_entity);
-        (*thread_ptr).set_state(ThreadState::Waiting);
-
         insert_wait_thread(thread);
         program_wait_ktimer();
 

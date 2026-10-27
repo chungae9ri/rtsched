@@ -47,7 +47,7 @@ of the crate. Example board integrations live in
 | --- | --- |
 | Scheduling scheme | Mixed soft real-time and fair scheduling with EDF-style `RtThread` timers and CFS-style `CfsThread` run queues. |
 | Timer framework | Intrusive red-black tree based `KTimer` queue for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
-| Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting` states, yielding, waiting, and idle-thread fallback. |
+| Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting`/`Suspended` states, yielding, waiting, and idle-thread fallback. |
 | Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
 | Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code starts a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
 | Diagnostics | Lightweight tracing counters, optional callbacks, cycle-counter helpers, and scheduler timing diagnostics. |
@@ -114,13 +114,21 @@ Each thread has an explicit `ThreadState`:
 
 - `Ready`: eligible to run when selected by the scheduler.
 - `Running`: currently executing on the CPU.
-- `Waiting`: blocked until a timeout or wait condition is satisfied.
+- `Waiting`: blocked with a finite timeout, optionally waiting for an event.
+- `Suspended`: blocked indefinitely until an external event or resource is ready.
 
 Scheduler code uses `ThreadCtx::set_state(ThreadState)` for runtime state changes.
 Normal transitions are `Ready -> Running`, `Running -> Ready`,
-`Running -> Waiting`, `Ready -> Waiting`, and `Waiting -> Ready`. A waiting
-thread must return to `Ready` before it can run again; `Waiting -> Running` is
-not a valid direct transition.
+`Running/Ready -> Waiting/Suspended`, and `Waiting/Suspended -> Ready`.
+Blocked threads must return to `Ready` before they can run again.
+Use `ThreadState::is_blocked()` to recognize both kinds of blocked thread.
+
+Finite waits use the ordered timeout tree; indefinite waits (`wake_at == u64::MAX`)
+use an intrusive FIFO list with constant-time insertion and removal. Per-object
+waiter urgency ordering is unchanged. Wait diagnostics visit finite waits first,
+then suspended threads in registration order. The shared wait timer remains
+linked when its earliest timeout is unchanged, while ready-timer selection is
+still refreshed after block/wake transitions.
 
 ## Scheduler Tracing
 

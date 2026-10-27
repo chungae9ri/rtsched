@@ -2,14 +2,21 @@ extern crate std;
 
 use super::*;
 use crate::ktimer::{RtKTimer, enqueue_ktimer, init_ktimer_queue, next_ktimer};
-use crate::rbtree::RBTree;
 use crate::runq::{CFS_RUN_QUEUE, SchedEntity, enqueue_thread};
 use crate::sched::{CURRENT_THREAD_IS_CFS, init_cfs};
 use crate::test_support::TEST_LOCK;
 use crate::thread::{
-    CfsThread, RtThread, ThreadCtx, ThreadKind, cfs_sched_entity, rt_ktimer_entity,
+    CfsThread, RtThread, ThreadCtx, ThreadKind, ThreadState, cfs_sched_entity, rt_ktimer_entity,
 };
 use crate::waitq::{WAIT_QUEUE, WaitEntity};
+
+fn assert_blocked_names(expected: &[&str]) {
+    let mut names = std::vec::Vec::new();
+    crate::diagnostics::waitq::traverse_wait_queue_fn(|thread| {
+        names.push(thread.thread_ctx().name);
+    });
+    assert_eq!(names, expected);
+}
 
 fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
     CfsThread {
@@ -46,7 +53,7 @@ fn rt_thread(name: &'static str) -> RtThread {
 
 unsafe fn reset_scheduler_state() {
     unsafe {
-        *WAIT_QUEUE.get() = RBTree::new();
+        WAIT_QUEUE.reset_for_test();
         init_ktimer_queue();
         init_cfs(100, 25);
         CURRENT_THREAD_CTX = ptr::null_mut();
@@ -155,7 +162,7 @@ pub fn blocking_sync_take_copies_current_scheduler_deadline() {
 
         assert_eq!((*sync_entity(handle)).deadline_at(), 25);
 
-        *WAIT_QUEUE.get() = RBTree::new();
+        WAIT_QUEUE.reset_for_test();
         CURRENT_THREAD_CTX = ptr::null_mut();
         CURRENT_THREAD_IS_CFS = false;
     }
@@ -188,7 +195,7 @@ pub fn mutex_lock_boosts_rt_owner_deadline_and_unlock_restores_it() {
     let waiter_guard = mutex.lock().expect("waiter should block on mutex");
 
     unsafe {
-        assert_eq!(waiter.thread.state, ThreadState::Waiting);
+        assert_eq!(waiter.thread.state, ThreadState::Suspended);
         assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 10);
         assert_eq!(owner_timer.entity.expire_at(), 10);
         assert!(ptr::eq(next_ktimer(), owner_timer.entity_mut()));
@@ -241,7 +248,7 @@ pub fn mutex_lock_boosts_rt_owner_to_earliest_scheduler_deadline_and_unlock_rest
     let waiter_guard = mutex.lock().expect("waiter should block on mutex");
 
     unsafe {
-        assert_eq!(waiter.thread.state, ThreadState::Waiting);
+        assert_eq!(waiter.thread.state, ThreadState::Suspended);
         assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 40);
         assert_eq!(owner_timer.entity.expire_at(), 25);
 
@@ -290,7 +297,7 @@ pub fn mutex_lock_boosts_cfs_owner_to_earliest_scheduler_deadline_and_unlock_res
     let waiter_guard = mutex.lock().expect("waiter should block on mutex");
 
     unsafe {
-        assert_eq!(waiter.thread.state, ThreadState::Waiting);
+        assert_eq!(waiter.thread.state, ThreadState::Suspended);
         let cfs = ptr::addr_of!(CFS_KTIMER);
         let cfs_entity = ptr::addr_of!((*cfs).entity);
         assert_eq!((*cfs_entity).expire_at(), 8);
@@ -337,9 +344,10 @@ pub fn binary_semaphore_take_blocks_current_cfs_thread_until_give() {
 
         assert_eq!(semaphore.take(), Ok(()));
 
-        assert_eq!(thread.thread.state, ThreadState::Waiting);
+        assert_eq!(thread.thread.state, ThreadState::Suspended);
         assert!(!semaphore.is_available());
-        assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+        assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+        assert_blocked_names(&["waiter"]);
         assert_eq!(
             (*wait_entity(handle)).waitevt,
             Some(SyncType::BinarySemaphore)
@@ -351,6 +359,7 @@ pub fn binary_semaphore_take_blocks_current_cfs_thread_until_give() {
         assert!(!semaphore.is_available());
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
+        assert_blocked_names(&[]);
 
         CURRENT_THREAD_CTX = ptr::null_mut();
         CURRENT_THREAD_IS_CFS = false;
@@ -400,9 +409,10 @@ pub fn counting_semaphore_take_blocks_current_cfs_thread_until_give() {
 
         assert_eq!(semaphore.take(), Ok(()));
 
-        assert_eq!(thread.thread.state, ThreadState::Waiting);
+        assert_eq!(thread.thread.state, ThreadState::Suspended);
         assert_eq!(semaphore.count(), 0);
-        assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+        assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+        assert_blocked_names(&["waiter"]);
         assert_eq!(
             (*wait_entity(handle)).waitevt,
             Some(SyncType::CountingSemaphore)
@@ -414,6 +424,7 @@ pub fn counting_semaphore_take_blocks_current_cfs_thread_until_give() {
         assert_eq!(semaphore.count(), 0);
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
+        assert_blocked_names(&[]);
 
         CURRENT_THREAD_CTX = ptr::null_mut();
         CURRENT_THREAD_IS_CFS = false;
@@ -429,6 +440,60 @@ pub fn counting_semaphore_take_without_current_thread_reports_error() {
     }
 
     assert_eq!(semaphore.take(), Err(SemaphoreError::NoCurrentThread));
+}
+
+pub fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let semaphore = CountingSemaphore::empty(1);
+    let mut later = rt_thread("later");
+    let mut earlier = rt_thread("earlier");
+    let later_ptr = ptr::addr_of_mut!(later).cast::<ThreadCtx>();
+    let earlier_ptr = ptr::addr_of_mut!(earlier).cast::<ThreadCtx>();
+    let mut later_timer = RtKTimer::new(80, later_ptr, "later");
+    let mut earlier_timer = RtKTimer::new(20, earlier_ptr, "earlier");
+
+    unsafe {
+        reset_scheduler_state();
+        let later_entity = ptr::addr_of_mut!(later_timer).cast::<crate::ktimer::KTimerEntity>();
+        let earlier_entity = ptr::addr_of_mut!(earlier_timer).cast::<crate::ktimer::KTimerEntity>();
+        crate::thread::set_rt_ktimer_entity(ThreadHandle::from_thread_ctx(later_ptr), later_entity);
+        crate::thread::set_rt_ktimer_entity(
+            ThreadHandle::from_thread_ctx(earlier_ptr),
+            earlier_entity,
+        );
+        enqueue_ktimer(later_entity);
+        enqueue_ktimer(earlier_entity);
+
+        CURRENT_THREAD_IS_CFS = false;
+        for thread in [later_ptr, earlier_ptr] {
+            (*thread).set_state(ThreadState::Running);
+            CURRENT_THREAD_CTX = thread;
+            assert_eq!(semaphore.take(), Ok(()));
+            assert_eq!((*thread).state, ThreadState::Suspended);
+        }
+        assert!((*WAIT_QUEUE.get()).is_empty());
+        assert_blocked_names(&["later", "earlier"]);
+        assert_eq!(semaphore.give(), Ok(()));
+        assert_eq!((*earlier_ptr).state, ThreadState::Ready);
+        assert_eq!((*later_ptr).state, ThreadState::Suspended);
+        assert!((*earlier_entity).is_active());
+        assert_eq!((*earlier_entity).expire_at(), 20);
+        assert_blocked_names(&["later"]);
+
+        (*earlier_ptr).set_state(ThreadState::Running);
+        CURRENT_THREAD_CTX = earlier_ptr;
+        assert_eq!(semaphore.take(), Ok(()));
+        assert_blocked_names(&["later", "earlier"]);
+        assert_eq!(semaphore.give(), Ok(()));
+        assert_eq!((*earlier_ptr).state, ThreadState::Ready);
+        assert_eq!(semaphore.give(), Ok(()));
+        assert_eq!((*later_ptr).state, ThreadState::Ready);
+        assert!((*later_entity).is_active());
+        assert_eq!(semaphore.count(), 0);
+        assert_blocked_names(&[]);
+        CURRENT_THREAD_CTX = ptr::null_mut();
+        CURRENT_THREAD_IS_CFS = false;
+    }
 }
 
 pub fn counting_semaphore_rejects_zero_max_count() {
@@ -523,8 +588,9 @@ pub fn mutex_lock_blocks_waiter_and_drop_transfers_ownership() {
         let waiter_handle = make_running_cfs(&mut waiter);
         let waiter_guard = mutex.lock().expect("waiter should block on mutex");
 
-        assert_eq!(waiter.thread.state, ThreadState::Waiting);
-        assert!((*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
+        assert_eq!(waiter.thread.state, ThreadState::Suspended);
+        assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
+        assert_blocked_names(&["waiter"]);
         assert_eq!((*wait_entity(waiter_handle)).waitevt, Some(SyncType::Mutex));
 
         core::mem::forget(waiter_guard);
@@ -542,6 +608,7 @@ pub fn mutex_lock_blocks_waiter_and_drop_transfers_ownership() {
         assert_eq!(waiter.thread.state, ThreadState::Ready);
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(waiter_handle)));
+        assert_blocked_names(&[]);
 
         owner.thread.set_state(ThreadState::Ready);
         waiter.thread.set_state(ThreadState::Running);

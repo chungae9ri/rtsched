@@ -158,15 +158,15 @@ pub enum ThreadState {
     ///
     /// Normal transitions:
     /// - `Ready -> Running` when selected by the scheduler.
-    /// - `Ready -> Waiting` when moved to a wait queue before it runs.
+    /// - `Ready -> Waiting/Suspended` when blocked before it runs.
     Ready,
     /// The thread is currently executing on the CPU.
     ///
     /// Normal transitions:
     /// - `Running -> Ready` when preempted or voluntarily yielding.
-    /// - `Running -> Waiting` when sleeping or waiting for an event.
+    /// - `Running -> Waiting/Suspended` when sleeping or waiting for an event.
     Running,
-    /// The thread cannot run until an external event or resource becomes ready.
+    /// The thread has a finite timeout, optionally waiting for an event.
     ///
     /// Normal transition:
     /// - `Waiting -> Ready` when its wait condition expires or is satisfied.
@@ -174,15 +174,24 @@ pub enum ThreadState {
     /// `Waiting -> Running` is deliberately not a scheduler transition; a
     /// thread must become `Ready` before it can be selected to run.
     Waiting,
+    /// The thread is waiting indefinitely for an external event or resource.
+    ///
+    /// Suspended threads have no timeout and become `Ready` when woken.
+    Suspended,
 }
 
 impl ThreadState {
+    /// Return whether the thread is blocked on a timeout or an external event.
+    pub const fn is_blocked(self) -> bool {
+        matches!(self, Self::Waiting | Self::Suspended)
+    }
+
     pub const fn can_transition_to(self, next: Self) -> bool {
         match (self, next) {
-            (Self::Ready, Self::Ready | Self::Running | Self::Waiting) => true,
-            (Self::Running, Self::Ready | Self::Running | Self::Waiting) => true,
+            (Self::Ready | Self::Running, _) => true,
             (Self::Waiting, Self::Ready | Self::Waiting) => true,
-            (Self::Waiting, Self::Running) => false,
+            (Self::Suspended, Self::Ready | Self::Suspended) => true,
+            (Self::Waiting | Self::Suspended, _) => false,
         }
     }
 }

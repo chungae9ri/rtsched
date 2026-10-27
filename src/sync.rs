@@ -21,8 +21,7 @@ use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
 use crate::sched::CURRENT_THREAD_CTX;
 use crate::thread::{
-    ThreadHandle, ThreadKind, ThreadState, rt_ktimer_entity, sync_entity,
-    thread_handle_from_sync_entity,
+    ThreadHandle, ThreadKind, rt_ktimer_entity, sync_entity, thread_handle_from_sync_entity,
 };
 use crate::waitq::{WaitQueueError, remove_wait_thread, wait_entity};
 
@@ -768,12 +767,8 @@ unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
         let thread = thread_handle_from_sync_entity(sync_entity as *mut SyncEntity);
         let state = (*thread.as_ptr()).state;
 
-        debug_assert_eq!(
-            state,
-            ThreadState::Waiting,
-            "sync waiter must remain in Waiting state"
-        );
-        if state != ThreadState::Waiting {
+        debug_assert!(state.is_blocked(), "sync waiter must remain blocked");
+        if !state.is_blocked() {
             return None;
         }
 

@@ -21,6 +21,7 @@ fn equal_deadlines_keep_strict_entity_ordering() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "entity is already linked into this tree")]
 fn ktimer_queue_rejects_duplicate_timer_insertions() {
     ktimer::ktimer_queue_rejects_duplicate_timer_insertions();
@@ -139,6 +140,16 @@ fn rt_only_initialization_does_not_enqueue_cfs_ktimer() {
 #[test]
 fn rt_waiting_thread_is_moved_from_ktimer_queue_to_wait_queue() {
     ktimer::rt_waiting_thread_is_moved_from_ktimer_queue_to_wait_queue();
+}
+
+#[test]
+fn shared_wait_timer_tracks_changes_to_the_earliest_finite_wait() {
+    ktimer::shared_wait_timer_tracks_changes_to_the_earliest_finite_wait();
+}
+
+#[test]
+fn unchanged_wait_deadline_still_refreshes_the_selected_rt_timer() {
+    ktimer::unchanged_wait_deadline_still_refreshes_the_selected_rt_timer();
 }
 
 #[test]
