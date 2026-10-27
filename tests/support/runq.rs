@@ -19,7 +19,7 @@ fn reset_run_queue() {
 
 fn reset_wait_queue() {
     unsafe {
-        *WAIT_QUEUE.get() = RBTree::new();
+        WAIT_QUEUE.reset_for_test();
     }
 }
 
@@ -86,7 +86,11 @@ pub fn enqueue_thread_updates_priority_sum_and_traversal_order() {
     }
 
     assert_eq!(unsafe { *CFS_RUN_QUEUE.priority_sum() }, 14);
-    assert_eq!(collect_thread_names(), ["first", "second", "third"]);
+    // Enqueue placement gives these threads equal vruntime. Their tie order
+    // depends on storage addresses, which can differ between build profiles.
+    let mut names = collect_thread_names();
+    names.sort_unstable();
+    assert_eq!(names, ["first", "second", "third"]);
 }
 
 pub fn lower_numeric_priority_accumulates_vruntime_more_slowly() {

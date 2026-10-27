@@ -25,8 +25,16 @@ fn thread_state_transition_matrix_documents_lifecycle() {
     assert!(ThreadState::Running.can_transition_to(ThreadState::Ready));
     assert!(ThreadState::Running.can_transition_to(ThreadState::Waiting));
     assert!(ThreadState::Waiting.can_transition_to(ThreadState::Ready));
+    assert!(ThreadState::Ready.can_transition_to(ThreadState::Suspended));
+    assert!(ThreadState::Running.can_transition_to(ThreadState::Suspended));
+    assert!(ThreadState::Suspended.can_transition_to(ThreadState::Ready));
 
     assert!(!ThreadState::Waiting.can_transition_to(ThreadState::Running));
+    assert!(!ThreadState::Suspended.can_transition_to(ThreadState::Running));
+    assert!(ThreadState::Waiting.is_blocked());
+    assert!(ThreadState::Suspended.is_blocked());
+    assert!(!ThreadState::Ready.is_blocked());
+    assert!(!ThreadState::Running.is_blocked());
 }
 
 #[test]
@@ -46,6 +54,7 @@ fn thread_context_helpers_follow_ready_running_waiting_ready_cycle() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "invalid thread state transition")]
 fn waiting_thread_cannot_transition_directly_to_running() {
     let mut cfs = test_support::cfs_thread("cfs", 1);
@@ -226,6 +235,7 @@ fn cfs_thread_builder_spawn_panics_on_zero_priority() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "thread storage pointer must be non-null")]
 fn raw_forkyi_rejects_null_thread_storage() {
     let mut stack = AlignedStack([0; 64]);
@@ -243,6 +253,7 @@ fn raw_forkyi_rejects_null_thread_storage() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "thread stack pointer must be non-null")]
 fn raw_forkyi_rejects_null_stack_pointer() {
     let mut storage = MaybeUninit::<CfsThread>::uninit();
@@ -260,6 +271,7 @@ fn raw_forkyi_rejects_null_stack_pointer() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "thread stack top must be 8-byte aligned")]
 fn raw_forkyi_rejects_unaligned_stack_top() {
     let mut storage = MaybeUninit::<CfsThread>::uninit();

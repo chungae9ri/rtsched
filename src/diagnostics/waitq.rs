@@ -6,9 +6,10 @@
 use crate::thread::{
     ThreadHandle, ThreadRef, thread_handle_from_wait_entity, thread_ref_from_handle,
 };
-use crate::waitq::{WAIT_QUEUE, wait_entity};
+use crate::waitq::WAIT_QUEUE;
 
-/// Traverse waiting threads in ascending wait-time order.
+/// Traverse finite waits in ascending wait-time order, then suspended threads
+/// in registration order.
 ///
 /// Pass `None` to return the first waiting thread. Pass the previously returned
 /// thread to return the next one. Returns `None` after the final waiting thread.
@@ -19,11 +20,7 @@ use crate::waitq::{WAIT_QUEUE, wait_entity};
 /// that the wait queue is not mutated during traversal.
 pub(crate) unsafe fn traverse_wait_queue(cursor: Option<ThreadHandle>) -> Option<ThreadHandle> {
     unsafe {
-        let tree = &*WAIT_QUEUE.get();
-        let entity = match cursor {
-            None => tree.first(),
-            Some(thread) => tree.next(wait_entity(thread)),
-        };
+        let entity = WAIT_QUEUE.next_wait_entity(cursor);
 
         if entity.is_null() {
             None
@@ -33,7 +30,10 @@ pub(crate) unsafe fn traverse_wait_queue(cursor: Option<ThreadHandle>) -> Option
     }
 }
 
-/// Visit waiting threads without exposing raw traversal cursors.
+/// Visit blocked threads without exposing raw traversal cursors.
+///
+/// Finite waits appear in ascending timeout order, followed by suspended
+/// threads in registration order.
 pub fn traverse_wait_queue_fn<F>(mut f: F)
 where
     F: for<'a> FnMut(ThreadRef<'a>),

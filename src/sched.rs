@@ -100,7 +100,7 @@ unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != next_thread_ptr
-            && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
+            && !(*CURRENT_THREAD_CTX).state.is_blocked()
         {
             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
         }
@@ -122,7 +122,7 @@ unsafe fn switch_to_idle_thread() {
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != idle_thread_ptr
-            && (*CURRENT_THREAD_CTX).state != ThreadState::Waiting
+            && !(*CURRENT_THREAD_CTX).state.is_blocked()
         {
             (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
         }
@@ -139,7 +139,7 @@ unsafe fn requeue_current_cfs_thread_before_idle() {
             || CURRENT_THREAD_CTX.is_null()
             || !CURRENT_THREAD_IS_CFS
             || is_idle_thread(CURRENT_THREAD_CTX)
-            || (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
+            || (*CURRENT_THREAD_CTX).state.is_blocked()
         {
             return;
         }
@@ -210,7 +210,7 @@ extern "C" fn schedule() {
                 let next_thread_ptr = next_thread.as_ptr();
 
                 if CURRENT_THREAD_IS_CFS {
-                    if (*CURRENT_THREAD_CTX).state == ThreadState::Waiting
+                    if (*CURRENT_THREAD_CTX).state.is_blocked()
                         || is_idle_thread(CURRENT_THREAD_CTX)
                     {
                         switch_to_cfs_thread(next_thread);
@@ -236,7 +236,7 @@ extern "C" fn schedule() {
                         }
                     }
                 } else {
-                    if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
+                    if !(*CURRENT_THREAD_CTX).state.is_blocked() {
                         (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                     }
                     switch_to_cfs_thread(next_thread);
@@ -252,7 +252,7 @@ extern "C" fn schedule() {
             }
             let next_thread_handle = ThreadHandle::from_thread_ctx(next_thread);
 
-            if (*CURRENT_THREAD_CTX).state != ThreadState::Waiting {
+            if !(*CURRENT_THREAD_CTX).state.is_blocked() {
                 (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
                 if CURRENT_THREAD_IS_CFS && !is_idle_thread(CURRENT_THREAD_CTX) {
                     let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);

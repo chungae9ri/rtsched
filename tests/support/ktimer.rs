@@ -43,7 +43,7 @@ unsafe fn thread_handle(thread: *mut ThreadCtx) -> ThreadHandle {
 
 fn reset_wait_queue() {
     unsafe {
-        *WAIT_QUEUE.get() = RBTree::new();
+        WAIT_QUEUE.reset_for_test();
     }
 }
 
@@ -804,6 +804,89 @@ pub fn rt_waiting_thread_is_moved_from_ktimer_queue_to_wait_queue() {
             collect_deadlines_at(&*KTIMER_QUEUE.get())
         );
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
+    }
+}
+
+pub fn shared_wait_timer_tracks_changes_to_the_earliest_finite_wait() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_wait_queue();
+    let mut first = crate::test_support::cfs_thread("first", 1);
+    let mut equal = crate::test_support::cfs_thread("equal", 1);
+    let mut earlier = crate::test_support::cfs_thread("earlier", 1);
+    first.wait_entity.wake_at = 40;
+    equal.wait_entity.wake_at = 40;
+    earlier.wait_entity.wake_at = 10;
+
+    unsafe {
+        init_ktimer_queue();
+        let queue = KTIMER_QUEUE.get();
+        let wait_timer = ptr::addr_of_mut!(WAIT_KTIMER.entity);
+        let first_handle = thread_handle(ptr::addr_of_mut!(first).cast::<ThreadCtx>());
+        let equal_handle = thread_handle(ptr::addr_of_mut!(equal).cast::<ThreadCtx>());
+        let earlier_handle = thread_handle(ptr::addr_of_mut!(earlier).cast::<ThreadCtx>());
+        insert_wait_thread(first_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), 40);
+        insert_wait_thread(equal_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), 40);
+        insert_wait_thread(earlier_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), 10);
+        assert_eq!((*queue).next_reload(), Some(9));
+        remove_wait_thread(earlier_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), 40);
+        remove_wait_thread(first_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), 40);
+        remove_wait_thread(equal_handle);
+        program_wait_ktimer();
+        assert_eq!((*wait_timer).expire_at(), KTIMER_EXPIRE_NEVER);
+        assert!(!(*wait_timer).is_active());
+        assert_eq!((*queue).len(), 1);
+        assert!((*queue).contains(wait_timer));
+    }
+}
+
+pub fn unchanged_wait_deadline_still_refreshes_the_selected_rt_timer() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_wait_queue();
+    let mut sleeper = crate::test_support::cfs_thread("sleeper", 1);
+    sleeper.wait_entity.wake_at = 40;
+    let mut rt = rt_thread("rt");
+    let mut rt_timer = RtKTimer::new(20, ptr::null_mut(), "rt");
+
+    unsafe {
+        init_ktimer_queue();
+        let queue = KTIMER_QUEUE.get();
+        let wait_timer = ptr::addr_of_mut!(WAIT_KTIMER.entity);
+        let sleeper_handle = thread_handle(ptr::addr_of_mut!(sleeper).cast::<ThreadCtx>());
+        rt_timer.init_rt_ktimer(ptr::addr_of_mut!(rt).cast::<ThreadCtx>());
+        let rt_entity = rt_timer.entity_mut();
+        insert_wait_thread(sleeper_handle);
+        program_wait_ktimer();
+        assert!(next_ktimer().is_null());
+
+        // Model a ready-index change before shared wait-timer programming.
+        (*queue).insert(rt_entity);
+        program_wait_ktimer();
+        assert_eq!(next_ktimer(), rt_entity);
+        assert_eq!((*wait_timer).expire_at(), 40);
+        assert!(!(*wait_timer).is_active());
+        (*queue).remove(rt_entity);
+        program_wait_ktimer();
+        assert!(next_ktimer().is_null());
+
+        remove_wait_thread(sleeper_handle);
+        program_wait_ktimer();
+        (*queue).insert(rt_entity);
+        program_wait_ktimer();
+        assert_eq!(next_ktimer(), rt_entity);
+        assert_eq!((*wait_timer).expire_at(), KTIMER_EXPIRE_NEVER);
+        assert_eq!((*queue).len(), 2);
+        (*queue).remove(rt_entity);
+        program_wait_ktimer();
     }
 }
 

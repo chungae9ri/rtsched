@@ -11,6 +11,7 @@ fn contains_reports_tree_membership_including_root() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 #[should_panic(expected = "entity is already linked into this tree")]
 fn inserting_same_entity_twice_panics_in_debug_builds() {
     rbtree::inserting_same_entity_twice_panics_in_debug_builds();

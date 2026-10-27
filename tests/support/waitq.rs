@@ -9,7 +9,7 @@ use std::vec::Vec;
 
 fn reset_wait_queue() {
     unsafe {
-        *WAIT_QUEUE.get() = RBTree::new();
+        WAIT_QUEUE.reset_for_test();
     }
 }
 
@@ -20,7 +20,11 @@ fn cfs_thread(name: &'static str, wake_at: u64, waitevt: Option<SyncType>) -> Cf
             exc_return: 0,
             id: 0,
             name,
-            state: ThreadState::Waiting,
+            state: if wake_at == u64::MAX {
+                ThreadState::Suspended
+            } else {
+                ThreadState::Waiting
+            },
             kind: ThreadKind::Cfs,
         },
         wait_entity: WaitEntity::new(),
@@ -153,4 +157,69 @@ pub fn remove_wait_thread_detaches_entity() {
 
     assert_eq!(collect_wake_at(), [2]);
     assert!(!first.wait_entity.rb_node.is_linked());
+}
+
+pub fn indefinite_waits_stay_visible_after_finite_waits_and_never_expire() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_wait_queue();
+    let mut first = cfs_thread("first", u64::MAX, Some(SyncType::Mutex));
+    let mut finite = cfs_thread("finite", 10, None);
+    let mut rt = crate::test_support::rt_thread("rt");
+    rt.wait_entity.wake_at = u64::MAX;
+
+    unsafe {
+        let first_handle = thread_handle(ptr::addr_of_mut!(first).cast::<ThreadCtx>());
+        let finite_handle = thread_handle(ptr::addr_of_mut!(finite).cast::<ThreadCtx>());
+        let rt_handle = thread_handle(ptr::addr_of_mut!(rt).cast::<ThreadCtx>());
+        insert_wait_thread(first_handle);
+        insert_wait_thread(finite_handle);
+        insert_wait_thread(rt_handle);
+        assert_eq!(rt.thread.state, ThreadState::Suspended);
+        assert_eq!(collect_wake_at(), [10]);
+        let mut names = Vec::new();
+        traverse_wait_queue_fn(|thread| names.push(thread.thread_ctx().name));
+        assert_eq!(names, ["finite", "first", "rt"]);
+        assert_eq!(pop_expired_wait_thread(9), None);
+        assert_eq!(pop_expired_wait_thread(10), Some(finite_handle));
+        assert_eq!(pop_expired_wait_thread(u64::MAX), None);
+        remove_wait_thread(first_handle);
+        remove_wait_thread(rt_handle);
+        assert!(traverse_wait_queue(None).is_none());
+    }
+}
+
+pub fn suspended_list_handles_middle_head_tail_and_reinsertion() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    reset_wait_queue();
+    let mut first = cfs_thread("first", u64::MAX, None);
+    let mut middle = cfs_thread("middle", u64::MAX, None);
+    let mut last = cfs_thread("last", u64::MAX, None);
+
+    unsafe {
+        let first_handle = thread_handle(ptr::addr_of_mut!(first).cast::<ThreadCtx>());
+        let middle_handle = thread_handle(ptr::addr_of_mut!(middle).cast::<ThreadCtx>());
+        let last_handle = thread_handle(ptr::addr_of_mut!(last).cast::<ThreadCtx>());
+        insert_wait_thread(first_handle);
+        insert_wait_thread(middle_handle);
+        insert_wait_thread(last_handle);
+        remove_wait_thread(middle_handle);
+        insert_wait_thread(middle_handle);
+        let mut names = Vec::new();
+        traverse_wait_queue_fn(|thread| names.push(thread.thread_ctx().name));
+        assert_eq!(names, ["first", "last", "middle"]);
+        remove_wait_thread(first_handle);
+        remove_wait_thread(middle_handle);
+        assert_eq!(traverse_wait_queue(None), Some(last_handle));
+        assert!(traverse_wait_queue(Some(last_handle)).is_none());
+        remove_wait_thread(last_handle);
+        assert!((*WAIT_QUEUE.suspended.get()).head.is_null());
+        assert!((*WAIT_QUEUE.suspended.get()).tail.is_null());
+        // A detached wait entity can subsequently register a finite timeout.
+        (*last_handle.as_ptr()).set_state(ThreadState::Ready);
+        (*wait_entity(last_handle)).wake_at = 5;
+        insert_wait_thread(last_handle);
+        assert_eq!(last.thread.state, ThreadState::Waiting);
+        assert_eq!(pop_expired_wait_thread(5), Some(last_handle));
+        assert!(traverse_wait_queue(None).is_none());
+    }
 }

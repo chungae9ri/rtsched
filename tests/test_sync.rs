@@ -56,6 +56,11 @@ fn counting_semaphore_take_blocks_current_cfs_thread_until_give() {
 }
 
 #[test]
+fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
+    sync::suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again();
+}
+
+#[test]
 fn counting_semaphore_take_without_current_thread_reports_error() {
     sync::counting_semaphore_take_without_current_thread_reports_error();
 }
