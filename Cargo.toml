@@ -81,3 +81,10 @@ path = "examples/sync_mutex.rs"
 test = false
 bench = false
 required-features = ["embedded-examples"]
+
+[[example]]
+name = "message_queue"
+path = "examples/message_queue.rs"
+test = false
+bench = false
+required-features = ["embedded-examples"]

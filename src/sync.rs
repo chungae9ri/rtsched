@@ -32,6 +32,8 @@ pub enum SyncType {
     BinarySemaphore = u32::from_be_bytes(*b"semb"),
     CountingSemaphore = u32::from_be_bytes(*b"semc"),
     Mutex = u32::from_be_bytes(*b"mute"),
+    MessageQueueSend = u32::from_be_bytes(*b"mqtx"),
+    MessageQueueReceive = u32::from_be_bytes(*b"mqrx"),
 }
 
 impl PartialOrd for SyncType {
@@ -60,6 +62,10 @@ impl SyncType {
             Some(Self::CountingSemaphore)
         } else if wait_event == Self::Mutex.wait_event() {
             Some(Self::Mutex)
+        } else if wait_event == Self::MessageQueueSend.wait_event() {
+            Some(Self::MessageQueueSend)
+        } else if wait_event == Self::MessageQueueReceive.wait_event() {
+            Some(Self::MessageQueueReceive)
         } else {
             None
         }
@@ -68,7 +74,7 @@ impl SyncType {
 
 const WAIT_FOREVER_TICKS: u64 = u64::MAX;
 
-type WaitTree = RBTree<SyncEntity>;
+pub(crate) type WaitTree = RBTree<SyncEntity>;
 
 #[repr(C)]
 pub(crate) struct SyncEntity {
@@ -693,7 +699,7 @@ unsafe fn restore_owner_deadline(state: &mut MutexState, owner: usize) {
     state.owner_boosted = false;
 }
 
-unsafe fn current_thread_handle() -> Option<ThreadHandle> {
+pub(crate) unsafe fn current_thread_handle() -> Option<ThreadHandle> {
     unsafe {
         if CURRENT_THREAD_CTX.is_null() {
             None
@@ -703,7 +709,7 @@ unsafe fn current_thread_handle() -> Option<ThreadHandle> {
     }
 }
 
-unsafe fn block_current_thread(
+pub(crate) unsafe fn block_current_thread(
     thread: ThreadHandle,
     sync_type: SyncType,
 ) -> Result<u64, WaitQueueError> {
@@ -751,17 +757,29 @@ unsafe fn block_current_thread_on<T: SyncWaitObject>(
 ) -> Result<u64, WaitQueueError> {
     unsafe {
         let deadline_at = block_current_thread(thread, T::SYNC_TYPE)?;
-        let entity = sync_entity(thread);
-        (*entity).set_deadline_at(deadline_at);
-        (*entity).reset_links();
-        object.waiters_mut().insert(entity);
+        insert_sync_waiter(object.waiters_mut(), thread, deadline_at);
         request_context_switch();
 
         Ok(deadline_at)
     }
 }
 
-unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
+// Call with serialized scheduler access, a detached SyncEntity, and a thread
+// already moved into the global blocked-thread index.
+pub(crate) unsafe fn insert_sync_waiter(
+    waiters: &mut WaitTree,
+    thread: ThreadHandle,
+    deadline_at: u64,
+) {
+    unsafe {
+        let entity = sync_entity(thread);
+        (*entity).set_deadline_at(deadline_at);
+        (*entity).reset_links();
+        waiters.insert(entity);
+    }
+}
+
+pub(crate) unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
     unsafe {
         let sync_entity = waiters.pop_first()?;
         let thread = thread_handle_from_sync_entity(sync_entity as *mut SyncEntity);
@@ -776,7 +794,7 @@ unsafe fn pop_waiting_thread(waiters: &mut WaitTree) -> Option<ThreadHandle> {
     }
 }
 
-unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueError> {
+pub(crate) unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueError> {
     unsafe {
         if (*thread.as_ptr()).is_cfs() {
             remove_wait_thread(thread);

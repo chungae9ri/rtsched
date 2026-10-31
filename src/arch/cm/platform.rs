@@ -259,7 +259,7 @@ fn host_critical_section<R, F>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    f()
+    crate::test_support::critical_section(f)
 }
 
 #[cfg(not(target_arch = "arm"))]
@@ -485,6 +485,25 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
 
 pub(crate) fn request_context_switch() {
     <DefaultPlatform as ContextSwitchPort>::request_context_switch();
+}
+
+/// Whether a blocking message queue call can allow PendSV to switch the current thread.
+/// Read this before entering the operation's own critical section.
+pub(crate) fn blocking_context_available() -> bool {
+    #[cfg(target_arch = "arm")]
+    {
+        let enabled = SCB::vect_active() == cortex_m::peripheral::scb::VectActive::ThreadMode
+            && cortex_m::register::primask::read().is_active();
+        #[cfg(target_has_atomic = "ptr")]
+        let enabled = enabled
+            && cortex_m::register::basepri::read() == 0
+            && cortex_m::register::faultmask::read().is_active();
+        enabled
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        false
+    }
 }
 
 /// Return the currently programmed scheduler-timer reload value.

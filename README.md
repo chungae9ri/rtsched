@@ -29,6 +29,7 @@ The crate includes:
 - CPU resource yielding (`yieldyi`) to the next `active` scheduler timer/entity.
 - Lightweight scheduler tracing counters and callbacks.
 - Preemptive context switching support.
+- Bounded FIFO message queues with blocking and nonblocking thread messaging.
 - `SysTick` integration for advancing timers and requesting scheduler dispatch.
 
 `rtsched` is intended to be used by a board crate that owns hardware setup,
@@ -48,6 +49,7 @@ of the crate. Example board integrations live in
 | Scheduling scheme | Mixed soft real-time and fair scheduling with EDF-style `RtThread` timers and CFS-style `CfsThread` run queues. |
 | Timer framework | Intrusive red-black tree based `KTimer` queue for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
 | Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting`/`Suspended` states, yielding, waiting, and idle-thread fallback. |
+| Messaging | Fixed-capacity `MessageQueue<T, N>` with inline copied payloads, multiple producers/consumers, and deadline-ordered sender/receiver wakeups. |
 | Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
 | Power management | Deadline-driven/tickless-style scheduling programs the next timer deadline, and board code starts a `cpu_idle` thread to enter low-power states such as `wfi` when no normal CFS or RT work is runnable. |
 | Diagnostics | Lightweight tracing counters, optional callbacks, cycle-counter helpers, and scheduler timing diagnostics. |
@@ -129,6 +131,35 @@ waiter urgency ordering is unchanged. Wait diagnostics visit finite waits first,
 then suspended threads in registration order. The shared wait timer remains
 linked when its earliest timeout is unchanged, while ready-timer selection is
 still refreshed after block/wake transitions.
+
+## Message queues
+
+Use a shared `MessageQueue<T, N>` for bounded FIFO delivery between CFS and RT
+threads. Messages are copied into inline storage, so no heap is required.
+
+```rust
+static EVENTS: rtsched::MessageQueue<u32, 8> = rtsched::MessageQueue::new();
+
+// Producer thread: suspend while the queue is full.
+EVENTS.send(42).unwrap();
+// Consumer thread: suspend while the queue is empty.
+let event = EVENTS.receive().unwrap();
+```
+
+`try_send` and `try_receive` return `MessageQueueStatus::Full` or
+`MessageQueueStatus::Empty` immediately and can be used in ordinary maskable
+interrupt handlers on the scheduler core. Payloads must be
+`Copy`, and shared queues additionally require `Send`. Blocking waits use
+`Suspended`; the earliest-deadline opposite waiter is woken and retries the
+operation. There are no timeouts or close operations in this version.
+
+See [the message queue design, implementation, and performance notes](docs/message_queue.md)
+for ordering guarantees, context restrictions, memory costs, benchmark results,
+and device measurement instructions. Run the native microbenchmark with:
+
+```sh
+cargo bench -p rtsched --bench message_queue --target x86_64-unknown-linux-gnu
+```
 
 ## Scheduler Tracing
 
@@ -347,6 +378,12 @@ Both threads update the same `Mutex<u32>` protected counter. The owner thread
 sleeps briefly while holding the guard, causing the contender to block until
 the guard drops and wakes the next waiter.
 
+`message_queue.rs` connects a CFS producer and an RT consumer through a
+four-slot FIFO. It exercises empty/full blocking and records sequence errors,
+progress, delivery latency, and a startup DWT benchmark of the no-waiter path.
+See [the measurement guide](docs/message_queue.md#cortex-m-example-and-measurement)
+for the debugger symbols and their interpretation.
+
 Compile-check every embedded example with:
 
 ```sh
@@ -374,5 +411,5 @@ probe-rs download \
 ```
 
 Replace `minimal_cfs` with `minimal_rt`, `mixed_rt_cfs`, `sleep_wake`,
-`sync_binary_semaphore`, `sync_counting_semaphore`, or `sync_mutex` to run the
-other examples.
+`sync_binary_semaphore`, `sync_counting_semaphore`, `sync_mutex`, or
+`message_queue` to run the other examples.

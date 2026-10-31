@@ -36,20 +36,24 @@ std::thread_local! {
 
 pub fn critical_section<R>(f: impl FnOnce() -> R) -> R {
     TEST_CRITICAL_SECTION_DEPTH.with(|depth| {
+        struct DepthGuard<'a>(&'a core::cell::Cell<usize>);
+        impl Drop for DepthGuard<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() - 1);
+            }
+        }
         if depth.get() > 0 {
             depth.set(depth.get() + 1);
-            let result = f();
-            depth.set(depth.get() - 1);
-            return result;
+            let _depth = DepthGuard(depth);
+            return f();
         }
 
         let _lock = TEST_CRITICAL_SECTION_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         depth.set(1);
-        let result = f();
-        depth.set(0);
-        result
+        let _depth = DepthGuard(depth);
+        f()
     })
 }
 
@@ -58,6 +62,7 @@ pub fn clear_print_fn_for_test() {
 }
 
 pub use crate::ktimer::test_support as ktimer;
+pub use crate::message::test_support as message;
 pub use crate::rbtree::test_support as rbtree;
 pub use crate::runq::test_support as runq;
 pub use crate::sched::test_support as sched;
