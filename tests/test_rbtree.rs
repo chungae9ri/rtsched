@@ -23,6 +23,11 @@ fn equal_keys_are_ordered_by_entity_address() {
 }
 
 #[test]
+fn upper_bound_finds_successors_for_linked_and_external_entities() {
+    rbtree::upper_bound_finds_successors_for_linked_and_external_entities();
+}
+
+#[test]
 fn remove_detaches_entity_and_preserves_order() {
     rbtree::remove_detaches_entity_and_preserves_order();
 }
