@@ -146,6 +146,31 @@ impl<T: RBTreeNode> RBTree<T> {
         }
     }
 
+    /// Return the first entity ordered strictly after `entity`.
+    ///
+    /// Unlike `next`, the search entity need not belong to this tree.
+    ///
+    /// # Safety
+    ///
+    /// `entity` must point to a live entity whose ordering key can be read.
+    pub unsafe fn upper_bound(&self, entity: *const T) -> *mut T {
+        let mut current = self.root;
+        let mut candidate = ptr::null_mut();
+
+        unsafe {
+            while !current.is_null() {
+                if T::cmp(entity, T::entity_of_const(current)) == Ordering::Less {
+                    candidate = current;
+                    current = (*current).left;
+                } else {
+                    current = (*current).right;
+                }
+            }
+        }
+
+        T::entity_of(candidate)
+    }
+
     pub fn contains(&self, entity: *const T) -> bool {
         let mut current = self.first();
 

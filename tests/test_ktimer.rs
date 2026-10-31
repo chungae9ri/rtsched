@@ -78,6 +78,26 @@ fn first_active_cache_tracks_inactive_frontier_mutations() {
 }
 
 #[test]
+fn mixed_timer_trees_preserve_order_across_rearms() {
+    ktimer::mixed_timer_trees_preserve_order_across_rearms();
+}
+
+#[test]
+fn yielded_rt_timer_programs_release_before_next_active_deadline() {
+    ktimer::yielded_rt_timer_programs_release_before_next_active_deadline();
+}
+
+#[test]
+fn deadline_update_keeps_inactive_timer_out_of_runnable_selection() {
+    ktimer::deadline_update_keeps_inactive_timer_out_of_runnable_selection();
+}
+
+#[test]
+fn dispatch_processes_simultaneous_active_expiry_and_inactive_release() {
+    ktimer::dispatch_processes_simultaneous_active_expiry_and_inactive_release();
+}
+
+#[test]
 fn refresh_next_ktimer_leaves_inactive_cfs_timer_inactive() {
     ktimer::refresh_next_ktimer_leaves_inactive_cfs_timer_inactive();
 }

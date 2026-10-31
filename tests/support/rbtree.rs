@@ -203,6 +203,42 @@ pub fn equal_keys_are_ordered_by_entity_address() {
     assert_eq!(collect_keys(&tree), [4, 4]);
 }
 
+pub fn upper_bound_finds_successors_for_linked_and_external_entities() {
+    let mut tree = RBTree::<TestEntity>::new();
+    let mut entities = [
+        TestEntity::new(20),
+        TestEntity::new(10),
+        TestEntity::new(20),
+        TestEntity::new(30),
+    ];
+    let probes = [
+        TestEntity::new(0),
+        TestEntity::new(10),
+        TestEntity::new(15),
+        TestEntity::new(20),
+        TestEntity::new(25),
+        TestEntity::new(30),
+        TestEntity::new(40),
+    ];
+    assert!(unsafe { tree.upper_bound(&probes[0]) }.is_null());
+
+    let mut ordered: Vec<*mut TestEntity> = entities.iter_mut().map(ptr::from_mut).collect();
+    for &entity in &ordered {
+        unsafe { tree.insert(entity) };
+    }
+    ordered.sort_unstable_by(|&a, &b| unsafe { TestEntity::cmp(a, b) });
+
+    for probe in probes.iter().chain(entities.iter()) {
+        let expected = ordered
+            .iter()
+            .copied()
+            .find(|&entity| unsafe { TestEntity::cmp(probe, entity) } == Ordering::Less)
+            .unwrap_or(ptr::null_mut());
+        assert_eq!(unsafe { tree.upper_bound(probe) }, expected);
+    }
+    assert_rb_invariants(&tree);
+}
+
 pub fn remove_detaches_entity_and_preserves_order() {
     let mut tree = RBTree::<TestEntity>::new();
     let mut entities = [

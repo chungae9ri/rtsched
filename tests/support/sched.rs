@@ -489,7 +489,8 @@ pub fn inactive_cfs_timer_falls_back_to_idle_without_popping_queued_cfs_thread()
 
     unsafe {
         let cfs_ktimer = reset_sched_state();
-        (*cfs_ktimer).set_active(false);
+        enqueue_ktimer(cfs_ktimer);
+        crate::ktimer::yield_ktimer(cfs_ktimer, 0, false);
         register_idle_thread(thread_handle(&mut idle.thread));
         CURRENT_THREAD_CTX = &mut rt.thread;
         CURRENT_THREAD_IS_CFS = false;

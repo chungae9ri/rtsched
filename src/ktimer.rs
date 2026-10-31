@@ -3,6 +3,10 @@
 
 //! Kernel timer queue keyed by ktimer expiration time.
 //!
+//! Active and inactive timers occupy separate trees with cached minima.
+//! Runnable selection reads the active minimum, while timer programming and
+//! expiry dispatch compare both minima so inactive releases and wakes still fire.
+//!
 //! The queue is intrusive: each `KTimerEntity` embeds its own `RbNode`, so
 //! inserting ktimers does not allocate.
 
@@ -165,10 +169,6 @@ impl KTimerEntity {
 
     pub fn is_active(&self) -> bool {
         self.active
-    }
-
-    pub fn set_active(&mut self, active: bool) {
-        self.active = active;
     }
 
     pub fn timing(&self) -> RtTiming {
@@ -350,7 +350,7 @@ pub unsafe fn init_ktimer_queue() {
         ptr::write(KTIMER_QUEUE.get(), KTimerQueue::new());
         ptr::write(&raw mut NEXT_KTIMER, ptr::null_mut());
         ptr::write(&raw mut WAIT_KTIMER, WaitKTimer::new());
-        (*KTIMER_QUEUE.get()).insert((*ptr::addr_of_mut!(WAIT_KTIMER)).entity_mut());
+        (*KTIMER_QUEUE.get()).enqueue_inactive((*ptr::addr_of_mut!(WAIT_KTIMER)).entity_mut());
     });
 }
 
@@ -362,7 +362,7 @@ pub(crate) unsafe fn enqueue_ktimer(entity: *mut KTimerEntity) {
             "ktimer entity is already queued"
         );
         (*entity).reset_links();
-        queue.insert(entity);
+        queue.enqueue_active(entity);
         refresh_next_ktimer(queue);
     });
 }
@@ -375,7 +375,6 @@ unsafe fn update_wait_ktimer_deadline(wait_ktimer_entity: *mut KTimerEntity) {
         } else {
             (*wait_ktimer_entity).set_expire_at((*wait_entity).wake_at);
         }
-        (*wait_ktimer_entity).set_active(false);
     }
 }
 
@@ -413,8 +412,7 @@ pub(crate) unsafe fn program_wait_ktimer() {
         if (*wait_ktimer_entity).expire_at() != expire_at {
             queue.remove(wait_ktimer_entity);
             (*wait_ktimer_entity).set_expire_at(expire_at);
-            (*wait_ktimer_entity).set_active(false);
-            queue.insert(wait_ktimer_entity);
+            queue.enqueue_inactive(wait_ktimer_entity);
         }
         // A wake can change the selected RT timer even when the wait deadline stays put.
         refresh_next_ktimer(queue);
@@ -440,7 +438,6 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
                 (*rt_thread).runtime = (*rt_thread).runtime.saturating_add(elapsed);
                 record_rt_budget_overrun(ktimer_entity, rt_thread);
 
-                (*ktimer_entity).set_active(true);
                 (*ktimer_entity).set_expire_after(
                     queue.now_ticks(),
                     (*ktimer_entity)
@@ -448,7 +445,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
                         .saturating_sub((*rt_thread).runtime),
                 );
                 (*ktimer_entity).reset_links();
-                queue.insert(ktimer_entity);
+                queue.enqueue_active(ktimer_entity);
             }
         }
     }
@@ -461,8 +458,7 @@ unsafe fn remove_ktimer(entity: *mut KTimerEntity) -> *mut KTimerEntity {
         }
 
         let queue = &mut *KTIMER_QUEUE.get();
-        let removed = queue.remove(entity);
-        (*removed).set_active(false);
+        let removed = queue.dequeue(entity);
         if NEXT_KTIMER == removed {
             refresh_next_ktimer(queue);
         }
@@ -481,9 +477,8 @@ unsafe fn reinsert_ktimer(entity: *mut KTimerEntity) {
             !queue.contains(entity.cast_const()),
             "ktimer entity is already queued"
         );
-        (*entity).set_active(true);
         (*entity).reset_links();
-        queue.insert(entity);
+        queue.enqueue_active(entity);
 
         refresh_next_ktimer(queue);
     });
@@ -507,7 +502,7 @@ unsafe fn refresh_next_ktimer(queue: &mut KTimerQueue) {
                 (*rt_thread).runtime = 0;
                 (*entity).set_expire_after(queue.now_ticks(), (*entity).relative_deadline_ticks());
             }
-            queue.insert(entity);
+            queue.enqueue_active(entity);
 
             entity = queue.first_active();
         }
@@ -672,6 +667,7 @@ pub(crate) unsafe fn set_thread_scheduler_expire_at(thread: ThreadHandle, expire
 
         let queue = &mut *KTIMER_QUEUE.get();
         let was_queued = queue.contains(entity.cast_const());
+        let was_active = (*entity).is_active();
 
         if was_queued {
             queue.remove(entity);
@@ -681,7 +677,11 @@ pub(crate) unsafe fn set_thread_scheduler_expire_at(thread: ThreadHandle, expire
 
         if was_queued {
             (*entity).reset_links();
-            queue.insert(entity);
+            if was_active {
+                queue.enqueue_active(entity);
+            } else {
+                queue.enqueue_inactive(entity);
+            }
             refresh_next_ktimer(queue);
         } else if NEXT_KTIMER == entity {
             refresh_next_ktimer(queue);
@@ -774,9 +774,8 @@ pub(crate) unsafe fn yield_ktimer(
             }
         }
 
-        (*entity).set_active(false);
         queue.advance_time(elapsed);
-        queue.insert(entity);
+        queue.enqueue_inactive(entity);
         queue.first_active()
     })
 }
@@ -877,33 +876,38 @@ unsafe impl RBTreeNode for KTimerEntity {
 }
 
 pub struct KTimerQueue {
-    tree: RBTree<KTimerEntity>,
-    left_most: *mut RbNode,
+    active_tree: RBTree<KTimerEntity>,
+    inactive_tree: RBTree<KTimerEntity>,
     first_active: *mut RbNode,
+    first_inactive: *mut RbNode,
     now_ticks: u64,
 }
 
 impl KTimerQueue {
     pub const fn new() -> Self {
         Self {
-            tree: RBTree::new(),
-            left_most: ptr::null_mut(),
+            active_tree: RBTree::new(),
+            inactive_tree: RBTree::new(),
             first_active: ptr::null_mut(),
+            first_inactive: ptr::null_mut(),
             now_ticks: 0,
         }
     }
 
     #[cfg(not(target_arch = "arm"))]
     pub fn is_empty(&self) -> bool {
-        self.tree.is_empty()
+        self.active_tree.is_empty() && self.inactive_tree.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.tree.len()
+        self.active_tree.len() + self.inactive_tree.len()
     }
 
     pub fn first(&self) -> *mut KTimerEntity {
-        <KTimerEntity as RBTreeNode>::entity_of(self.left_most)
+        Self::earlier_of(
+            self.first_active(),
+            <KTimerEntity as RBTreeNode>::entity_of(self.first_inactive),
+        )
     }
 
     pub fn first_active(&self) -> *mut KTimerEntity {
@@ -912,15 +916,37 @@ impl KTimerQueue {
 
     #[cfg(not(target_arch = "arm"))]
     pub fn last(&self) -> *mut KTimerEntity {
-        self.tree.last()
+        let active = self.active_tree.last();
+        let inactive = self.inactive_tree.last();
+        if active.is_null() {
+            inactive
+        } else if inactive.is_null()
+            || unsafe { <KTimerEntity as RBTreeNode>::cmp(active, inactive) } == Ordering::Greater
+        {
+            active
+        } else {
+            inactive
+        }
     }
 
+    /// Return the next timer in combined expiration/address order.
     pub fn next(&self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
-        self.tree.next(entity)
+        if entity.is_null() {
+            return ptr::null_mut();
+        }
+
+        unsafe {
+            let (own_tree, other_tree) = if (*entity).is_active() {
+                (&self.active_tree, &self.inactive_tree)
+            } else {
+                (&self.inactive_tree, &self.active_tree)
+            };
+            Self::earlier_of(own_tree.next(entity), other_tree.upper_bound(entity))
+        }
     }
 
     pub fn contains(&self, entity: *const KTimerEntity) -> bool {
-        self.tree.contains(entity)
+        self.active_tree.contains(entity) || self.inactive_tree.contains(entity)
     }
 
     pub fn now_ticks(&self) -> u64 {
@@ -977,19 +1003,17 @@ impl KTimerQueue {
                 if is_wait_ktimer(expired) {
                     wake_wait_thread(self, elapsed);
                     update_wait_ktimer_deadline(expired);
-                    self.insert(expired);
+                    self.enqueue_inactive(expired);
                 } else if is_cfs_ktimer(expired) {
                     if (*expired).is_active() {
                         (*expired).set_expire_after(
                             self.now_ticks,
                             (*expired).period_ticks().saturating_sub(elapsed),
                         );
-                        (*expired).set_active(false);
-                        self.insert(expired);
+                        self.enqueue_inactive(expired);
                     } else {
                         (*expired).set_expire_after(self.now_ticks, (*expired).period_ticks());
-                        (*expired).set_active(true);
-                        self.insert(expired);
+                        self.enqueue_active(expired);
                     }
                 } else {
                     let thread_ctx = (*KTimerEntity::container_of(expired)).thread_ctx();
@@ -1003,14 +1027,13 @@ impl KTimerQueue {
                     (*rt_thread).runtime = 0;
                     (*expired)
                         .set_expire_after(self.now_ticks, (*expired).relative_deadline_ticks());
-                    (*expired).set_active(true);
-                    self.insert(expired);
+                    self.enqueue_active(expired);
                 }
             }
         }
     }
 
-    /// Insert a detached ktimer entity into the queue.
+    /// Enqueue a detached timer as eligible for scheduler selection.
     ///
     /// # Safety
     ///
@@ -1018,60 +1041,99 @@ impl KTimerQueue {
     /// that outlives its queue membership. It must not already be linked into
     /// this or any other timer queue. Callers must hold exclusive access to the
     /// queue and serialize insertion against scheduler interrupts and other
-    /// queue mutations.
-    pub unsafe fn insert(&mut self, entity: *mut KTimerEntity) {
+    /// queue mutations. Its expiration must remain unchanged until it is removed.
+    pub unsafe fn enqueue_active(&mut self, entity: *mut KTimerEntity) {
+        unsafe { self.insert(entity, true) };
+    }
+
+    /// Enqueue a detached timer as an inactive release or wakeup event.
+    ///
+    /// # Safety
+    ///
+    /// `entity` must be non-null, valid for mutation, and backed by storage
+    /// that outlives its queue membership. It must not already be linked into
+    /// this or any other timer queue. Callers must hold exclusive access to the
+    /// queue and serialize insertion against scheduler interrupts and other
+    /// queue mutations. Its expiration must remain unchanged until it is removed.
+    pub unsafe fn enqueue_inactive(&mut self, entity: *mut KTimerEntity) {
+        unsafe { self.insert(entity, false) };
+    }
+
+    unsafe fn insert(&mut self, entity: *mut KTimerEntity, active: bool) {
         unsafe {
-            self.tree.insert(entity);
-            if self.left_most.is_null()
+            debug_assert!(
+                !self.contains(entity.cast_const()),
+                "entity is already linked into this tree"
+            );
+            let (tree, left_most) = if active {
+                (&mut self.active_tree, &mut self.first_active)
+            } else {
+                (&mut self.inactive_tree, &mut self.first_inactive)
+            };
+            tree.insert(entity);
+            (*entity).active = active;
+            if left_most.is_null()
                 || <KTimerEntity as RBTreeNode>::cmp(
                     entity.cast_const(),
-                    <KTimerEntity as RBTreeNode>::entity_of_const(self.left_most),
+                    <KTimerEntity as RBTreeNode>::entity_of_const(*left_most),
                 ) == Ordering::Less
             {
-                self.left_most = <KTimerEntity as RBTreeNode>::node(entity);
+                *left_most = <KTimerEntity as RBTreeNode>::node(entity);
             }
-            self.update_first_active_cache_with(entity);
         }
     }
 
-    /// Remove a ktimer entity from the queue.
+    /// Temporarily remove a timer, preserving its previous active state for
+    /// expiry processing and deadline updates. Use `dequeue` when blocking it.
     ///
     /// # Safety
     ///
     /// `entity` must be non-null and currently linked into this queue. Callers
     /// must hold exclusive access to the queue and serialize removal against
-    /// scheduler interrupts and other queue mutations.
+    /// scheduler interrupts and other queue mutations. Its active state and
+    /// expiration must still match the values used when it was inserted.
     pub unsafe fn remove(&mut self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
+        if entity.is_null() {
+            return ptr::null_mut();
+        }
+
         unsafe {
-            let removing_left_most = !entity.is_null()
-                && ptr::eq(
-                    <KTimerEntity as RBTreeNode>::node(entity).cast_const(),
-                    self.left_most.cast_const(),
-                );
+            let (tree, left_most) = if (*entity).is_active() {
+                (&mut self.active_tree, &mut self.first_active)
+            } else {
+                (&mut self.inactive_tree, &mut self.first_inactive)
+            };
+            let removing_left_most = ptr::eq(
+                <KTimerEntity as RBTreeNode>::node(entity).cast_const(),
+                (*left_most).cast_const(),
+            );
             let next_left_most = if removing_left_most {
-                <KTimerEntity as RBTreeNode>::node(self.tree.next(entity))
-            } else {
-                ptr::null_mut()
-            };
-            let removing_first_active = !entity.is_null()
-                && ptr::eq(
-                    <KTimerEntity as RBTreeNode>::node(entity).cast_const(),
-                    self.first_active.cast_const(),
-                );
-            let next_first_active = if removing_first_active {
-                <KTimerEntity as RBTreeNode>::node(self.next_active_after(entity))
+                <KTimerEntity as RBTreeNode>::node(tree.next(entity))
             } else {
                 ptr::null_mut()
             };
 
-            let removed = self.tree.remove(entity);
+            let removed = tree.remove(entity);
             if removing_left_most {
-                self.left_most = next_left_most;
-            }
-            if removing_first_active {
-                self.first_active = next_first_active;
+                *left_most = next_left_most;
             }
 
+            removed
+        }
+    }
+
+    /// Remove a timer and clear its scheduling eligibility, for example when
+    /// its thread blocks. A null timer is returned unchanged.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `entity` must satisfy the requirements of `Self::remove`.
+    pub unsafe fn dequeue(&mut self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
+        unsafe {
+            let removed = self.remove(entity);
+            if !removed.is_null() {
+                (*removed).active = false;
+            }
             removed
         }
     }
@@ -1097,32 +1159,14 @@ impl KTimerQueue {
         }
     }
 
-    unsafe fn update_first_active_cache_with(&mut self, entity: *mut KTimerEntity) {
-        unsafe {
-            if !(*entity).is_active() {
-                return;
-            }
-            if self.first_active.is_null()
-                || <KTimerEntity as RBTreeNode>::cmp(
-                    entity.cast_const(),
-                    <KTimerEntity as RBTreeNode>::entity_of_const(self.first_active),
-                ) == Ordering::Less
-            {
-                self.first_active = <KTimerEntity as RBTreeNode>::node(entity);
-            }
+    fn earlier_of(a: *mut KTimerEntity, b: *mut KTimerEntity) -> *mut KTimerEntity {
+        if a.is_null() {
+            return b;
         }
-    }
-
-    unsafe fn next_active_after(&self, entity: *mut KTimerEntity) -> *mut KTimerEntity {
-        unsafe {
-            let mut next = self.tree.next(entity);
-            while !next.is_null() {
-                if (*next).is_active() {
-                    return next;
-                }
-                next = self.tree.next(next);
-            }
-            ptr::null_mut()
+        if b.is_null() || unsafe { <KTimerEntity as RBTreeNode>::cmp(a, b) } == Ordering::Less {
+            a
+        } else {
+            b
         }
     }
 }

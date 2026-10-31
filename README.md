@@ -18,7 +18,7 @@ programming, and context switching.
 The crate includes:
 
 - `Earliest Deadline First (EDF)` scheduling through the `KTimer` framework.
-- A kernel timer queue built on an intrusive red-black tree.
+- A kernel timer queue built on separate intrusive red-black trees for active and inactive timers.
 - CFS (Completely Fair Scheduler) style scheduled threads `CfsThread` through the `RunQueue` red-black tree.
 - `RtThread` associated with a dedicated `KTimer` entry for `EDF` scheduling.
 - `ThreadHandle` and `ThreadId` for referring to spawned threads without
@@ -47,7 +47,7 @@ of the crate. Example board integrations live in
 | Feature area | What `rtsched` provides |
 | --- | --- |
 | Scheduling scheme | Mixed soft real-time and fair scheduling with EDF-style `RtThread` timers and CFS-style `CfsThread` run queues. |
-| Timer framework | Intrusive red-black tree based `KTimer` queue for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
+| Timer framework | Separate active/inactive intrusive red-black trees for expiration times, CFS execution windows, RT releases, and sleep wakeups. |
 | Thread management | Thread spawning with dedicated stacks, explicit `Ready`/`Running`/`Waiting`/`Suspended` states, yielding, waiting, and idle-thread fallback. |
 | Messaging | Fixed-capacity `MessageQueue<T, N>` with inline copied payloads, multiple producers/consumers, and deadline-ordered sender/receiver wakeups. |
 | Architecture portability | Scheduler core is separated from platform code through common traits; Cortex-M is implemented today and host stubs keep tests/docs usable. |
@@ -177,8 +177,8 @@ non-blocking, and allocation-free.
 
 ## KTimer framework
 
-The `KTimer` framework is the foundation for both CFS and RT scheduling. It builds a
-red-black tree with `KTimerEntity` defined as:
+The `KTimer` framework is the foundation for both CFS and RT scheduling. It uses
+separate active and inactive red-black trees with `KTimerEntity` defined as:
 ```
 pub struct KTimerEntity {
     expire_at: u64,
@@ -223,10 +223,22 @@ deadline is reached.
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
 `runtime`. The inactive RT timer is parked until the next `period_ticks` release.
 
-`RbNode` is the entry to the `KTimer` rbtree.
+Each timer's embedded `RbNode` belongs to exactly one of the two trees. Active
+timers are eligible for scheduler selection; inactive timers track future
+releases and the shared wait timer's next wakeup. `enqueue_active()` and
+`enqueue_inactive()` set a detached timer's eligibility and insert it into the
+matching tree together; there is no standalone active-state setter. Remove a
+timer before updating its expiration or enqueueing it into the other tree.
+Temporary `remove()` preserves its previous active state for expiry processing;
+`dequeue()` clears eligibility when the timer leaves the queue to block.
 
-`active` timers are eligible for scheduler selection; inactive timers remain in the tree but are skipped by
-`first_active()`.
+Both trees cache their earliest timer. `first_active()` reads the active minimum
+in O(1), and `first()` compares the two minima in O(1) to choose the next event
+for SysTick programming or expiry dispatch. Removing the active minimum finds
+its successor only in the active tree, without scanning inactive timers. Both
+trees use the same `now_ticks` clock and preserve exact absolute expiration
+ordering, including the entity-address tie-breaker. Combined diagnostic
+traversal uses an O(log K) successor lookup per timer, where K is the timer count.
 
 ## CFS (Completely Fair Scheduler) Scheduler
 
@@ -262,15 +274,15 @@ runnable. Diagnostics can inspect it through `traverse_idle_thread_fn`.
 
 ## Soft Realtime Scheduler for RtThread
 
-Each `RtThread` has its own `RtKTimer` entry in the `KTimer` red-black tree (rbtree).
+Each `RtThread` has its own `RtKTimer` entry in one of the `KTimer` red-black trees.
 
 `RtThread` should complete its job before the deadline and yield (`yieldyi`) CPU ownership to the next thread
-at the left-most entry in the `KTimer` rbtree. Active RT timers are ordered by
+at the left-most entry in the active `KTimer` rbtree. Active RT timers are ordered by
 their absolute job deadline, computed from `relative_deadline_ticks`. When the
 current `RtThread` yields after finishing a job, it is set to `inactive` and
-reinserted with a new `expire_at` based on the next `period_ticks` release. It
-becomes active again when that release timer expires, with a fresh relative
-deadline.
+reinserted into the inactive tree with a new `expire_at` based on the next
+`period_ticks` release. When that release timer expires, it moves back to the
+active tree with a fresh relative deadline.
 
 `RtKTimer::new(period_ticks, ...)` keeps the compatibility behavior where period,
 relative deadline, and budget all use the same tick value. Use
