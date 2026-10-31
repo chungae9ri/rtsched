@@ -26,6 +26,8 @@
 //!   expiry or scheduler wake-up paths.
 //! - [`handle_sched_tick`] advances timers and requests dispatch from the
 //!   target-specific context-switch path.
+//! - [`MessageQueue`] transfers copied FIFO messages between threads, with
+//!   bounded inline storage and blocking or nonblocking send/receive operations.
 //!
 //! # Safety
 //!
@@ -55,6 +57,7 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
 mod clock;
 mod diagnostics;
 mod ktimer;
+mod message;
 #[doc(hidden)]
 pub mod print;
 mod rbtree;
@@ -77,6 +80,8 @@ pub use thread::{
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
+
+pub use message::{MessageQueue, MessageQueueStatus};
 
 pub use print::set_print_fn;
 

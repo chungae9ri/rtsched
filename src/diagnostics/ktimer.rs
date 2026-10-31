@@ -426,6 +426,8 @@ fn sync_type_name(waitevt: Option<SyncType>) -> &'static str {
         Some(SyncType::BinarySemaphore) => "binary-semaphore",
         Some(SyncType::CountingSemaphore) => "counting-semaphore",
         Some(SyncType::Mutex) => "mutex",
+        Some(SyncType::MessageQueueSend) => "message-queue-send",
+        Some(SyncType::MessageQueueReceive) => "message-queue-receive",
         None => "none",
     }
 }
