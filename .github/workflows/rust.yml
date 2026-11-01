@@ -32,4 +32,4 @@ jobs:
     - name: Build examples
       run: cargo build --examples --features embedded-examples --target ${{ env.CARGO_BUILD_TARGET }}
     - name: Run tests
-      run: cargo test --manifest-path Cargo.toml --target x86_64-unknown-linux-gnu
+      run: cargo test --manifest-path Cargo.toml --features host --target x86_64-unknown-linux-gnu

@@ -9,7 +9,7 @@ pub fn set_print_fn(print_fn: PrintFn) {
     PRINT_FN.store(print_fn as usize, Ordering::Release);
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 pub(crate) fn clear_print_fn_for_test() {
     PRINT_FN.store(0, Ordering::Release);
 }

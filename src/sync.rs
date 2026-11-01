@@ -809,6 +809,6 @@ pub(crate) unsafe fn wake_waiter(thread: ThreadHandle) -> Result<(), WaitQueueEr
     }
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/sync.rs"]
 pub mod test_support;

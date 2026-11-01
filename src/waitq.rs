@@ -53,7 +53,7 @@ impl WaitQueue {
         }
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub(crate) unsafe fn reset_for_test(&self) {
         unsafe {
             ptr::write(self.tree.get(), RBTree::new());
@@ -258,6 +258,6 @@ pub(crate) unsafe fn remove_wait_thread(thread: ThreadHandle) {
     }
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/waitq.rs"]
 pub mod test_support;

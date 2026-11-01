@@ -31,7 +31,7 @@ fn scheduler_started() -> bool {
     unsafe { ptr::read_volatile(&raw const SCHEDULER_STARTED) != 0 }
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 fn mark_scheduler_started() {
     unsafe {
         ptr::write_volatile(&raw mut SCHEDULER_STARTED, 1);
@@ -319,6 +319,6 @@ pub fn handle_sched_tick() {
     request_context_switch();
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/sched.rs"]
 pub mod test_support;

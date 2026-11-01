@@ -13,6 +13,7 @@ keywords = ["scheduler", "embedded", "cortex-m", "no-std", "rtos"]
 categories = ["embedded", "no-std", "os"]
 include = [
     "/Cargo.toml",
+    "/build.rs",
     "/LICENSE",
     "/README.md",
     "/docs/**",
@@ -26,8 +27,12 @@ name = "rtsched"
 bench = false
 
 [features]
+host = []
 embedded-examples = []
 sched-isr-timing = []
+
+[package.metadata.docs.rs]
+features = ["host"]
 
 [dependencies]
 cortex-m = "0.7.7"

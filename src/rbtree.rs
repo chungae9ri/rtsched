@@ -587,6 +587,6 @@ fn parent_right(node: *mut RbNode) -> *mut RbNode {
     right_of(node)
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/rbtree.rs"]
 pub mod test_support;

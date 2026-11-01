@@ -282,6 +282,6 @@ pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueu
     })
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/runq.rs"]
 pub mod test_support;

@@ -67,7 +67,7 @@ mod sync;
 mod thread;
 mod waitq;
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[doc(hidden)]
 pub mod test_support;
 
@@ -85,11 +85,16 @@ pub use message::{MessageQueue, MessageQueueStatus};
 
 pub use print::set_print_fn;
 
-pub use arch::cm::platform::{
-    ContextSwitchPort, CortexMPlatform, CriticalSectionPort, CycleCounterPort, DefaultPlatform,
-    HostPlatform, InitialThreadContext, Platform, SchedulerTimerPort, ThreadStackPort,
-    dwt_cycle_count, get_elapse_cycles, get_elapse_msec, get_elapse_msec_since,
-    init_dwt_cycle_counter, reset_elapse_counter, spawn_main_thread,
+#[cfg(all(target_arch = "arm", not(feature = "host")))]
+pub use arch::platform::CortexMPlatform;
+#[cfg(feature = "host")]
+pub use arch::platform::HostPlatform;
+
+pub use arch::platform::{
+    ContextSwitchPort, CriticalSectionPort, CycleCounterPort, DefaultPlatform,
+    InitialThreadContext, Platform, SchedulerTimerPort, ThreadStackPort, dwt_cycle_count,
+    get_elapse_cycles, get_elapse_msec, get_elapse_msec_since, init_dwt_cycle_counter,
+    reset_elapse_counter, spawn_main_thread,
 };
 
 pub use ktimer::{RtKTimer, RtTiming, init_ktimer_queue, is_active_ktimer, next_ktimer_reload};

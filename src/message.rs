@@ -296,13 +296,13 @@ impl<T: Copy, const N: usize> Default for MessageQueue<T, N> {
 fn resume_after_block() {
     // Make the pending PendSV take effect before retrying. This runs after
     // restoring the caller's interrupt mask, with no queue borrow held.
-    #[cfg(target_arch = "arm")]
+    #[cfg(all(target_arch = "arm", not(feature = "host")))]
     {
         cortex_m::asm::dsb();
         cortex_m::asm::isb();
     }
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/message.rs"]
 pub mod test_support;
