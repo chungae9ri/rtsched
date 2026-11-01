@@ -8,12 +8,14 @@ description = "A no_std runtime scheduler for Cortex-M thread management"
 license = "MIT"
 repository = "https://github.com/chungae9ri/rtsched"
 documentation = "https://docs.rs/rtsched"
+readme = "README.md"
 keywords = ["scheduler", "embedded", "cortex-m", "no-std", "rtos"]
 categories = ["embedded", "no-std", "os"]
 include = [
     "/Cargo.toml",
     "/LICENSE",
     "/README.md",
+    "/docs/**",
     "/examples/**",
     "/src/**",
     "/tests/**",
