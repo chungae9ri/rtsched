@@ -228,7 +228,7 @@ added. A blocked send also retains its ordinary `T` argument on the thread stack
 Run from the workspace root:
 
 ```sh
-cargo bench -p rtsched --bench message_queue --target x86_64-unknown-linux-gnu
+cargo bench -p rtsched --bench message_queue --features host --target x86_64-unknown-linux-gnu
 ```
 
 The benchmark warms up 1,000 pairs and records nine samples of 100,000 successful

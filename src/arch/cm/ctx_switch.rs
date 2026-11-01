@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 kwangdo.yi
 
-#[cfg(target_arch = "arm")]
 mod imp {
     use core::arch::{asm, global_asm};
     use core::ptr;
@@ -174,5 +173,4 @@ mod imp {
     pendsv_handler!();
 }
 
-#[cfg(target_arch = "arm")]
 pub use self::imp::spawn_main_thread;

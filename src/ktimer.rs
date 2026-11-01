@@ -14,7 +14,7 @@ use core::cell::UnsafeCell;
 use core::cmp::Ordering;
 use core::mem::offset_of;
 use core::ptr;
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
 use crate::arch::platform;
@@ -36,9 +36,9 @@ static mut NEXT_KTIMER: *mut KTimerEntity = ptr::null_mut();
 pub(crate) static mut CFS_KTIMER: CfsKTimer = CfsKTimer::new(0, 0, "cfs");
 pub(crate) static mut WAIT_KTIMER: WaitKTimer = WaitKTimer::new();
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 static TEST_ELAPSED_TICKS_OVERRIDE_SET: AtomicBool = AtomicBool::new(false);
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 static TEST_ELAPSED_TICKS_OVERRIDE: AtomicU32 = AtomicU32::new(0);
 
 struct GlobalKTimerQueue {
@@ -105,7 +105,7 @@ pub(crate) struct KTimerEntity {
 }
 
 impl KTimerEntity {
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub const fn new(expire_ticks: u32) -> Self {
         Self::new_with_timing(expire_ticks, RtTiming::from_period(expire_ticks))
     }
@@ -119,7 +119,7 @@ impl KTimerEntity {
         }
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn expire(&self) -> u32 {
         self.expire_at.min(u64::from(u32::MAX)) as u32
     }
@@ -162,7 +162,7 @@ impl KTimerEntity {
         self.node.reset_links();
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn is_linked(&self) -> bool {
         self.node.is_linked()
     }
@@ -226,12 +226,12 @@ impl CfsKTimer {
         ptr::addr_of_mut!(self.entity)
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn execution_ticks(&self) -> u32 {
         self.entity.relative_deadline_ticks()
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn period_ticks(&self) -> u32 {
         self.entity.period_ticks()
     }
@@ -562,7 +562,7 @@ pub fn next_ktimer_reload() -> Option<u32> {
 }
 
 pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     {
         if TEST_ELAPSED_TICKS_OVERRIDE_SET.load(AtomicOrdering::Relaxed) {
             return TEST_ELAPSED_TICKS_OVERRIDE.load(AtomicOrdering::Relaxed);
@@ -575,13 +575,13 @@ pub(crate) fn elapsed_ticks_since_last_interrupt() -> u32 {
         .unwrap_or_default()
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 pub(crate) fn set_elapsed_ticks_since_last_interrupt_for_test(elapsed: u32) {
     TEST_ELAPSED_TICKS_OVERRIDE.store(elapsed, AtomicOrdering::Relaxed);
     TEST_ELAPSED_TICKS_OVERRIDE_SET.store(true, AtomicOrdering::Relaxed);
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 pub(crate) fn clear_elapsed_ticks_since_last_interrupt_for_test() {
     TEST_ELAPSED_TICKS_OVERRIDE_SET.store(false, AtomicOrdering::Relaxed);
     TEST_ELAPSED_TICKS_OVERRIDE.store(0, AtomicOrdering::Relaxed);
@@ -894,7 +894,7 @@ impl KTimerQueue {
         }
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn is_empty(&self) -> bool {
         self.active_tree.is_empty() && self.inactive_tree.is_empty()
     }
@@ -914,7 +914,7 @@ impl KTimerQueue {
         <KTimerEntity as RBTreeNode>::entity_of(self.first_active)
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn last(&self) -> *mut KTimerEntity {
         let active = self.active_tree.last();
         let inactive = self.inactive_tree.last();
@@ -953,7 +953,7 @@ impl KTimerQueue {
         self.now_ticks
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn next_deadline(&self) -> Option<u32> {
         let first = self.first();
         if first.is_null() {
@@ -963,7 +963,7 @@ impl KTimerQueue {
         }
     }
 
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub fn next_reload(&self) -> Option<u32> {
         unsafe { scheduler_timer_reload_for_entity(self, self.first()) }
     }
@@ -1146,7 +1146,7 @@ impl KTimerQueue {
     /// mutation and backed by storage that outlives the returned borrow.
     /// Callers must hold exclusive access to the queue and serialize removal
     /// against scheduler interrupts and other queue mutations.
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(feature = "host")]
     pub unsafe fn pop_first(&mut self) -> Option<&mut KTimerEntity> {
         let first = self.first();
         if first.is_null() {
@@ -1177,6 +1177,6 @@ impl Default for KTimerQueue {
     }
 }
 
-#[cfg(not(target_arch = "arm"))]
+#[cfg(feature = "host")]
 #[path = "../tests/support/ktimer.rs"]
 pub mod test_support;

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use rtsched::test_support;
+use rtsched::{CriticalSectionPort, DefaultPlatform};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -11,7 +11,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn host_critical_section_allows_nested_calls() {
     let _guard = TEST_LOCK.lock().unwrap();
 
-    let value = test_support::critical_section(|| test_support::critical_section(|| 42));
+    let value = DefaultPlatform::critical_section(|| DefaultPlatform::critical_section(|| 42));
 
     assert_eq!(value, 42);
 }
@@ -29,7 +29,7 @@ fn host_critical_section_serializes_parallel_threads() {
         let overlaps = Arc::clone(&overlaps);
         handles.push(thread::spawn(move || {
             for _ in 0..100 {
-                test_support::critical_section(|| {
+                DefaultPlatform::critical_section(|| {
                     if active.swap(true, Ordering::SeqCst) {
                         overlaps.fetch_add(1, Ordering::SeqCst);
                     }
@@ -51,8 +51,8 @@ fn host_critical_section_serializes_parallel_threads() {
 fn host_critical_section_restores_serialization_after_nested_panic() {
     let _guard = TEST_LOCK.lock().unwrap();
     let result = std::panic::catch_unwind(|| {
-        test_support::critical_section(|| {
-            test_support::critical_section(|| panic!("test critical-section unwinding"));
+        DefaultPlatform::critical_section(|| {
+            DefaultPlatform::critical_section(|| panic!("test critical-section unwinding"));
         });
     });
     assert!(result.is_err());
@@ -63,7 +63,7 @@ fn host_critical_section_restores_serialization_after_nested_panic() {
     let exercise = || {
         barrier.wait();
         for _ in 0..200 {
-            test_support::critical_section(|| {
+            DefaultPlatform::critical_section(|| {
                 if active.fetch_add(1, Ordering::SeqCst) != 0 {
                     overlaps.fetch_add(1, Ordering::SeqCst);
                 }
