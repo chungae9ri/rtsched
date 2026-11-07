@@ -27,9 +27,9 @@ can select the next runnable entity.
 
 `minimal_rt.rs` demonstrates one periodic RT thread. The `control` thread uses
 `RtKTimer::new_with_timing()` with a 50 ms period, 20 ms relative deadline, and
-5 ms budget. Each job resets the RT runtime counter with
-`set_rt_thread_start_time(0)`, increments `CONTROL_JOBS`, performs a short spin,
-and calls `yieldyi()` to finish the current job window.
+5 ms budget. Each job increments `CONTROL_JOBS`, performs a short spin, and
+calls `yieldyi()` to finish the current job window. Yielding accounts the
+completed job and resets its runtime counter automatically.
 
 `mixed_rt_cfs.rs` demonstrates RT and CFS work sharing the same scheduler. It
 creates a background CFS thread plus two RT threads: `fast_rt` with a 40 ms
@@ -60,8 +60,11 @@ sleeps briefly while holding the guard, causing the contender to block until
 the guard drops and wakes the next waiter.
 
 `message_queue.rs` connects a CFS producer and an RT consumer through a
-four-slot FIFO. It exercises empty/full blocking and records sequence errors,
-progress, delivery latency, and a startup DWT benchmark of the no-waiter path.
+four-slot FIFO. Startup demonstrates send and receive timeouts, then cancels a
+blocked receive. Sample traffic uses bounded waits and retries timed-out sends
+without skipping sequence numbers. Debugger counters record expected timeouts,
+cancellation, sequence errors, progress, delivery latency, and a startup DWT
+benchmark of the no-waiter path.
 See [the measurement guide](message_queue.md#cortex-m-example-and-measurement)
 for the debugger symbols and their interpretation.
 

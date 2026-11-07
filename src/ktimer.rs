@@ -22,6 +22,7 @@ use crate::arch::platform::{SCHEDULER_TIMER_RELOAD_MAX, SCHEDULER_TIMER_RELOAD_M
 use crate::critical_section;
 use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::enqueue_runq_from_waitq;
+use crate::sync::{MessageWaitResult, finish_message_wait};
 use crate::thread::{
     RtThread, ThreadCtx, ThreadHandle, ThreadKind, ThreadState, rt_ktimer_entity,
     rt_thread_from_handle, set_rt_ktimer_entity,
@@ -427,6 +428,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
             };
             let wait_thread_ptr = wait_thread.as_ptr();
 
+            finish_message_wait(wait_thread, MessageWaitResult::TimedOut);
             (*wait_thread_ptr).set_state(ThreadState::Ready);
             crate::diagnostics::trace::record_wakeup(wait_thread_ptr);
             if (*wait_thread_ptr).is_cfs() {
@@ -588,7 +590,19 @@ pub(crate) fn clear_elapsed_ticks_since_last_interrupt_for_test() {
 }
 
 pub(crate) fn elapsed_ticks_since_current_reload() -> u32 {
-    elapsed_ticks_from_platform_timer()
+    critical_section(|| unsafe {
+        let queue = &*KTIMER_QUEUE.get();
+        queue
+            .time_with_elapsed(elapsed_ticks_from_platform_timer())
+            .saturating_sub(queue.now_ticks()) as u32
+    })
+}
+
+/// Current scheduler time, including ticks since the last timer reprogramming.
+pub(crate) fn current_time_ticks() -> u64 {
+    critical_section(|| unsafe {
+        (*KTIMER_QUEUE.get()).time_with_elapsed(elapsed_ticks_from_platform_timer())
+    })
 }
 
 fn scheduler_timer_reload() -> Option<u32> {
@@ -607,7 +621,7 @@ fn elapsed_ticks_from_platform_timer() -> u32 {
 
 pub(crate) unsafe fn advance_ktimers(elapsed: u32) {
     unsafe {
-        (*KTIMER_QUEUE.get()).advance_time(elapsed);
+        (*KTIMER_QUEUE.get()).advance_timer_interval(elapsed);
     }
 }
 
@@ -823,10 +837,15 @@ unsafe fn scheduler_timer_reload_for_entity(
 pub(crate) fn program_next_scheduler_timer() -> Option<u32> {
     critical_section(|| unsafe {
         let queue = &mut *KTIMER_QUEUE.get();
+        // Account time spent between a cooperative yield and timer programming
+        // without counting the already charged part of this interval twice.
+        queue.now_ticks = queue.time_with_elapsed(elapsed_ticks_from_platform_timer());
         let reload = scheduler_timer_reload_for_entity(queue, queue.first())?;
 
         debug_assert!((SCHEDULER_TIMER_RELOAD_MIN..=SCHEDULER_TIMER_RELOAD_MAX).contains(&reload));
-        let _ = platform::program_scheduler_timer_reload(reload);
+        if platform::program_scheduler_timer_reload(reload) {
+            queue.timer_epoch_ticks = queue.now_ticks;
+        }
 
         Some(reload)
     })
@@ -881,6 +900,10 @@ pub struct KTimerQueue {
     first_active: *mut RbNode,
     first_inactive: *mut RbNode,
     now_ticks: u64,
+    // Reset to now_ticks when the scheduler timer is reprogrammed - yieldyi().
+    // This allows the scheduler to account for elapsed time since
+    // the last timer programming.
+    timer_epoch_ticks: u64,
 }
 
 impl KTimerQueue {
@@ -891,7 +914,21 @@ impl KTimerQueue {
             first_active: ptr::null_mut(),
             first_inactive: ptr::null_mut(),
             now_ticks: 0,
+            timer_epoch_ticks: 0,
         }
+    }
+
+    // The hardware counter can keep running after a software yield has already
+    // advanced now_ticks. Its elapsed value is relative to timer_epoch_ticks,
+    // not the newer now_ticks; adding it to now_ticks would expire waits early.
+    fn time_with_elapsed(&self, elapsed: u32) -> u64 {
+        self.now_ticks
+            .max(self.timer_epoch_ticks.saturating_add(u64::from(elapsed)))
+    }
+
+    fn advance_timer_interval(&mut self, elapsed: u32) {
+        self.now_ticks = self.time_with_elapsed(elapsed);
+        self.timer_epoch_ticks = self.now_ticks;
     }
 
     #[cfg(feature = "host")]

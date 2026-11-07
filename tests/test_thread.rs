@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use rtsched::test_support;
 use rtsched::{
     AlignedStack, CfsThread, CfsThreadBuilder, IdleThread, RtKTimer, RtThread, RtThreadBuilder,
-    SyncType, ThreadCtx, ThreadKind, ThreadStart, ThreadState, current_thread, current_thread_id,
-    init_ktimer_queue, set_rt_thread_start_time,
+    SyncType, ThreadCtx, ThreadKind, ThreadStart, ThreadState, current_rt_thread_runtime,
+    current_thread, current_thread_id, init_ktimer_queue,
 };
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -418,8 +418,8 @@ fn rt_thread_helpers_access_runtime_and_ktimer_entity() {
     }
 
     assert!(rt.has_ktimer());
-    assert!(set_rt_thread_start_time(42));
-    assert_eq!(rt.runtime(), 42);
+    assert_eq!(rt.runtime(), 0);
+    assert_eq!(current_rt_thread_runtime(), Some(0));
     assert_eq!(current_thread_id(), Some(rt.thread_ctx().id()));
     assert!(
         current_thread()
@@ -433,7 +433,7 @@ fn rt_thread_helpers_access_runtime_and_ktimer_entity() {
 }
 
 #[test]
-fn set_rt_thread_start_time_ignores_cfs_current_thread() {
+fn current_rt_thread_runtime_ignores_cfs_current_thread() {
     let _guard = TEST_LOCK.lock().unwrap();
     let mut cfs = test_support::cfs_thread("cfs", 1);
 
@@ -441,7 +441,7 @@ fn set_rt_thread_start_time_ignores_cfs_current_thread() {
         test_support::set_current_thread(cfs.thread_ctx_mut(), true);
     }
 
-    assert!(!set_rt_thread_start_time(42));
+    assert_eq!(current_rt_thread_runtime(), None);
 
     unsafe {
         test_support::clear_current_thread();
@@ -449,12 +449,12 @@ fn set_rt_thread_start_time_ignores_cfs_current_thread() {
 }
 
 #[test]
-fn set_rt_thread_start_time_ignores_missing_current_thread() {
+fn current_rt_thread_runtime_ignores_missing_current_thread() {
     let _guard = TEST_LOCK.lock().unwrap();
 
     unsafe {
         test_support::clear_current_thread();
     }
 
-    assert!(!set_rt_thread_start_time(42));
+    assert_eq!(current_rt_thread_runtime(), None);
 }

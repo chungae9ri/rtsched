@@ -13,3 +13,8 @@ waiter urgency ordering is unchanged. Wait diagnostics visit finite waits first,
 then suspended threads in registration order. The shared wait timer remains
 linked when its earliest timeout is unchanged, while ready-timer selection is
 still refreshed after block/wake transitions.
+
+[Timed message-queue waits](message_queue.md#timeouts-and-cancellation) also use
+the timeout tree. Expiry removes their per-queue waiter entry before restoring
+runnable state. Message-queue cancellation removes both wait memberships, so a
+later timer expiry cannot wake the same operation again.

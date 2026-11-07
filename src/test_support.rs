@@ -62,7 +62,7 @@ pub fn clear_print_fn_for_test() {
 }
 
 pub use crate::ktimer::test_support as ktimer;
-pub use crate::message::test_support as message;
+pub use crate::messageq::test_support as messageq;
 pub use crate::rbtree::test_support as rbtree;
 pub use crate::runq::test_support as runq;
 pub use crate::sched::test_support as sched;

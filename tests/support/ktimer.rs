@@ -718,7 +718,7 @@ pub fn rt_yield_marks_timer_inactive_and_preserves_remaining_period() {
     }
 }
 
-pub fn rt_yield_with_reset_runtime_finishes_current_job_window() {
+pub fn yieldyi_resets_rt_runtime_after_scheduling_next_release() {
     let _guard = TEST_LOCK.lock().unwrap();
 
     let mut rt = rt_thread("rt");
@@ -728,22 +728,30 @@ pub fn rt_yield_with_reset_runtime_finishes_current_job_window() {
     unsafe {
         reset_global_ktimer_queue();
         ktimer.init_rt_ktimer(&mut rt.thread);
+        // Model runtime already charged by earlier work/sleeps in this job.
+        rt.runtime = 15;
+        rt.thread.set_state(ThreadState::Running);
+        crate::test_support::set_current_thread(&mut rt.thread, false);
         {
             let queue = &mut *KTIMER_QUEUE.get();
             queue.enqueue_active(ktimer.entity_mut());
             queue.enqueue_active(&mut active_later);
         }
 
-        let next = yield_ktimer(ktimer.entity_mut(), 15, true);
-        assert!(ptr::eq(next, &active_later));
+        assert_eq!(crate::current_rt_thread_runtime(), Some(15));
+        // The host has no hardware timer, so the final elapsed interval is zero.
+        crate::yieldyi();
+        assert!(ptr::eq(next_ktimer(), &active_later));
+        assert_eq!(crate::current_rt_thread_runtime(), Some(0));
+        crate::test_support::clear_current_thread();
     }
 
     assert_eq!(rt.runtime, 0);
     assert!(!ktimer.entity.is_active());
-    assert_eq!(ktimer.entity.expire_at(), 60);
+    assert_eq!(ktimer.entity.expire_at(), 45);
     unsafe {
         let queue = &*KTIMER_QUEUE.get();
-        assert_eq!(queue.now_ticks(), 15);
+        assert_eq!(queue.now_ticks(), 0);
         assert_eq!(ktimer.entity.remaining_at(queue.now_ticks()), 45);
     }
 }
@@ -1185,4 +1193,26 @@ pub fn dispatch_expired_inactive_rt_timer_uses_relative_deadline() {
     assert_eq!(rt.runtime, 0);
     assert!(ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 140);
+}
+
+pub fn timer_clock_does_not_recharge_a_software_yield() {
+    let mut queue = KTimerQueue::new();
+    queue.advance_timer_interval(100);
+    assert_eq!(queue.time_with_elapsed(7), 107);
+
+    // A cooperative yield charges these seven ticks before PendSV reprograms
+    // the hardware counter. Reading that same counter must still report 107.
+    queue.advance_time(7);
+    assert_eq!(queue.time_with_elapsed(7), 107);
+    assert_eq!(queue.time_with_elapsed(9), 109);
+
+    // SysTick can arrive before PendSV. Only the rest of its interval is new.
+    queue.advance_timer_interval(20);
+    assert_eq!(queue.now_ticks(), 120);
+    assert_eq!(queue.time_with_elapsed(3), 123);
+
+    // Reprogramming the timer establishes a new elapsed-time epoch.
+    queue.now_ticks = queue.time_with_elapsed(3);
+    queue.timer_epoch_ticks = queue.now_ticks;
+    assert_eq!(queue.time_with_elapsed(2), 125);
 }

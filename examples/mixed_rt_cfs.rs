@@ -97,7 +97,6 @@ extern "C" fn background_work(_arg: *mut c_void) -> ! {
 
 extern "C" fn fast_rt_job(_arg: *mut c_void) -> ! {
     loop {
-        rtsched::set_rt_thread_start_time(0);
         FAST_JOBS.fetch_add(1, Ordering::Relaxed);
         common::spin(4_000);
         rtsched::yieldyi();
@@ -106,7 +105,6 @@ extern "C" fn fast_rt_job(_arg: *mut c_void) -> ! {
 
 extern "C" fn slow_rt_job(_arg: *mut c_void) -> ! {
     loop {
-        rtsched::set_rt_thread_start_time(0);
         SLOW_JOBS.fetch_add(1, Ordering::Relaxed);
         common::spin(12_000);
         rtsched::yieldyi();

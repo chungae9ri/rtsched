@@ -1,6 +1,6 @@
 # Message queues
 
-[Documentation index](../README.md) · Source: [`src/message.rs`](../src/message.rs)
+[Documentation index](../README.md) · Source: [`src/messageq.rs`](../src/messageq.rs)
 
 `MessageQueue<T, N>` transfers FIFO messages between any number of CFS and RT
 threads on the scheduler core. It uses fixed inline storage, has no heap
@@ -24,9 +24,10 @@ let event = EVENTS.receive().unwrap();
 `try_send` and `try_receive` return `MessageQueueStatus::Full` or
 `MessageQueueStatus::Empty` immediately and can be used in ordinary maskable
 interrupt handlers on the scheduler core. Payloads must be
-`Copy`, and shared queues additionally require `Send`. Blocking waits use
-`Suspended`; the earliest-deadline opposite waiter is woken and retries the
-operation. There are no timeouts or close operations in this version.
+`Copy`, and shared queues additionally require `Send`. Indefinite waits use
+`Suspended`; timed waits use `Waiting`. The earliest-deadline unexpired opposite
+waiter is woken and retries the operation. Timed operations and cancellation are
+described below; queues do not have a close operation.
 
 ## API and usage
 
@@ -58,6 +59,9 @@ fn next_reading() -> Result<Reading, MessageQueueStatus> {
 | `try_receive()` | Returns the oldest value; wakes one sender | Returns `Empty`; changes nothing |
 | `send(value)` | Same enqueue as `try_send` | Suspends the running thread and retries when woken |
 | `receive()` | Same dequeue as `try_receive` | Suspends the running thread and retries when woken |
+| `send_timeout(value, timeout_ms)` | Same enqueue as `try_send` | Waits until space, timeout, or cancellation |
+| `receive_timeout(timeout_ms)` | Same dequeue as `try_receive` | Waits until data, timeout, or cancellation |
+| `cancel_wait(thread)` | Cancels that thread's blocked operation on this queue; returns `true` | Returns `false` if there is no cancellable wait; an already due wait is timed out |
 | `capacity()` | Compile-time capacity `N` | Never blocks |
 | `len()`, `is_empty()`, `is_full()` | Instantaneous buffer occupancy | Never suspends; snapshots can immediately become stale |
 
@@ -65,8 +69,9 @@ Send and receive operations return `Result<_, MessageQueueStatus>`. Successful
 operations return `Ok`; `Err(MessageQueueStatus::Full)` and
 `Err(MessageQueueStatus::Empty)` are normal, retryable outcomes of nonblocking
 operations. Blocking operations handle full/empty conditions by suspending and
-retrying. The other status variants report an unavailable execution context or
-a scheduler wait-queue failure.
+retrying. `TimedOut` and `Cancelled` terminate a blocked operation without
+transferring its message. The remaining status variants report an unavailable
+execution context or a scheduler wait-queue failure.
 
 `new()` and `Default` create an empty queue. `new()` is `const`, so a queue can
 be declared as a safe shared `static`. Zero capacity is a setup error and panics
@@ -111,15 +116,70 @@ from another critical section. Calls that can complete immediately succeed
 without a running scheduler, including native host builds. Native builds return
 an error rather than trying to park a host OS thread when blocking is required.
 
-This first version has indefinite waits only. It has no timeout, cancellation,
-close/disconnect, dynamic resizing, broadcast, or priority inheritance. RT code
-with a strict completion bound should use `try_send`/`try_receive` and an explicit
-application fallback. A full queue can otherwise depend indefinitely on a slow
-consumer, and an empty queue on a slow producer.
+There is no close/disconnect, dynamic resizing, broadcast, or priority
+inheritance. Use a timed operation to limit resource waiting, or
+`try_send`/`try_receive` when RT code must not suspend.
+
+## Timeouts and cancellation
+
+`send_timeout(value, timeout_ms)` and `receive_timeout(timeout_ms)` use
+milliseconds, consistent with `msleepyi`. Configure the scheduler clock with
+`update_sys_clk_freq()` before using finite waits. The implementation converts
+milliseconds to an absolute `u64` scheduler-tick deadline, including elapsed
+ticks in the current timer interval. Conversion does not truncate long waits
+to `u32` ticks; deadlines saturate below the indefinite-wait sentinel.
+
+Each call attempts an immediate transfer first. With a zero timeout, an
+available message/slot succeeds and an unavailable one returns `TimedOut`
+without registering a wait. After a call has waited, expiry takes precedence
+over a transfer. Its original deadline survives every wake-and-retry cycle,
+including when another caller takes the message or slot before it resumes.
+An already notified thread that does not run again until its deadline has
+passed also returns `TimedOut`, preserving the queued message or free slot.
+
+```rust
+use rtsched::{MessageQueue, MessageQueueStatus};
+
+static EVENTS: MessageQueue<u32, 8> = MessageQueue::new();
+
+// Worker thread: wait up to 25 ms for the next event.
+match EVENTS.receive_timeout(25) {
+    Ok(event) => { /* handle the event */ }
+    Err(MessageQueueStatus::TimedOut) => { /* handle inactivity */ }
+    Err(MessageQueueStatus::Cancelled) => { /* stop or change work */ }
+    Err(_) => { /* handle an invalid context or scheduler error */ }
+}
+```
+
+Keep the `ThreadHandle` returned when spawning a worker. Another thread, or an
+ordinary maskable interrupt on the scheduler core, can call
+`EVENTS.cancel_wait(worker_handle)`. If the worker is blocked in a send or
+receive on that queue, cancellation removes both waiter registrations, makes
+it ready, and returns `true`. The blocked call later returns `Cancelled`.
+Both timed and indefinite operations support this cancellation.
+
+Cancellation affects only the current registered wait. It does not terminate
+the thread, retract queued messages, latch a request for its next operation,
+or cancel a wait on another queue or synchronization primitive. Once a peer
+has notified the worker, cancellation returns `false`; if the worker reblocks,
+a later cancellation can target that new wait. No persistent cancellation token
+is retained.
+
+Timeout, peer notification, and cancellation are serialized in the scheduler
+critical section. At or after the timeout deadline, timeout wins even if the
+timer interrupt has not run yet: a peer skips expired waiters, and cancellation
+completes a due wait as `TimedOut` and returns `false`. A cancellation completed
+before the deadline remains `Cancelled` even if the worker runs much later.
+
+These limits bound the queue wait, not the time at which the function returns.
+After wakeup, normal CFS/RT scheduling still determines when the worker runs.
+The native host backend continues to return context errors if an unavailable
+queue would require actually suspending an OS thread. Zero-timeout and
+immediately successful operations work without a running scheduler.
 
 ## Storage and invariants
 
-The implementation is in `src/message.rs`. Its `UnsafeCell<QueueState<T, N>>` contains:
+The implementation is in `src/messageq.rs`. Its `UnsafeCell<QueueState<T, N>>` contains:
 
 - `[MaybeUninit<T>; N]` for the payloads;
 - a head index and a count of initialized, occupied slots;
@@ -138,9 +198,12 @@ or payload callback inside the critical section. Copying a larger `T` still take
 more interrupt-masked time.
 
 The trees reuse each thread's existing `SyncEntity` links. The global blocked
-thread index uses that same thread's separate `WaitEntity` links. No thread
-structure or context-switch assembly layout changes, and no per-wait heap or
-stack node is retained by the queue. A blocked sender keeps its message in its
+thread index uses that same thread's separate `WaitEntity` links. `SyncEntity`
+also stores the pending message-wait tree pointer and completion result, so
+timer expiry can detach the object waiter and report timeout safely. This adds
+a pointer and status, plus alignment padding, to each CFS/RT thread. The
+assembly-visible `ThreadCtx` layout is unchanged. No per-wait heap or stack node
+is retained by the queue. A blocked sender keeps its message in its
 own suspended call frame; the queue holds only a thread's intrusive waiter node,
 never a pointer to its payload or the receiver's output.
 
@@ -156,21 +219,26 @@ Cortex-M code. Mutable queue-storage borrows end before wakeup trace callbacks.
 The blocking path performs the availability check and waiter registration in one
 critical section. A producer cannot publish between an empty check and receiver
 registration, and a consumer cannot free space between a full check and sender
-registration. This prevents a missed wakeup at the check-to-sleep boundary.
+registration. The queue rechecks availability after registration as well, since
+scheduler accounting may invoke a reentrant print/trace hook that posts data or
+frees a slot. This prevents a missed wakeup at the check-to-sleep boundary.
 
 When unavailable, the queue uses the existing synchronization block helper to
 account elapsed scheduler time, move the thread out of its runnable index, and
-register an indefinite wait. `insert_wait_thread()` selects `Suspended` because
-`wake_at == u64::MAX`; the queue does not force `Waiting`. The thread is also
+register a wait. `insert_wait_thread()` selects `Suspended` for indefinite waits
+(`wake_at == u64::MAX`) and `Waiting` for finite deadlines. The thread is also
 inserted into the relevant per-queue tree and PendSV is requested. After the
 critical section restores interrupt state, barriers allow the pending context
 switch to take effect before the operation retries.
 
-Each successful send removes at most one receiver from the queue's receiver
-tree. Each successful receive removes at most one sender. Existing wake helpers
-remove the global suspended-list entry, set `Ready`, and restore CFS run-queue or
-RT timer membership. The scheduler subsequently transitions `Ready -> Running`.
-Wakeups use the existing trace counters and callbacks.
+Each successful send notifies at most one unexpired receiver; each successful
+receive notifies at most one unexpired sender. Expired waiters encountered
+before that peer are removed and completed as `TimedOut` too. Existing wake
+helpers remove the global wait entry, set `Ready`, and restore CFS run-queue or
+RT timer membership. Timer expiry removes the per-queue waiter before doing
+the same runnable-state restoration. Cancellation removes both memberships.
+The scheduler subsequently transitions `Ready -> Running`. Wakeups use the
+existing trace counters and callbacks.
 
 Waiters are ordered by their scheduler deadline captured when they block:
 the CFS scheduler timer's deadline for a CFS thread, or the individual RT timer's
@@ -194,19 +262,29 @@ display `message-queue-send` or `message-queue-receive`.
 ## Performance model
 
 Let `S` be the payload size, `W` the relevant waiter count, `K` the timer count,
-and `R` the queued runnable CFS thread count. Timer insertion/removal costs `F`,
+`B` the finite blocked-thread count, and `R` the queued runnable CFS thread count.
+Timer insertion/removal costs `F`,
 O(log(K + 1)) in optimized builds. Active and inactive timers use separate trees,
 so removing the first active timer does not scan inactive timers. Debug builds
 also scan for duplicate membership during insertion. Costs below exclude
 user-installed trace/print callbacks and the subsequent PendSV context switch.
+Global wait removal costs `G`: O(1) for an indefinite suspended-list entry or
+O(log(B + 1)) for a finite timeout-tree entry.
 
 | Path | Work while interrupts are masked |
 | --- | --- |
 | Successful send/receive, no waiters | O(S) payload copy and O(1) ring metadata; no tree scan |
 | Full `try_send` / empty `try_receive` | O(1); no payload copy or state change |
-| Register blocked operation | O(log(W + 1) + F) waiter/timer work and O(1) suspended-list insertion |
-| Wake RT peer | O(S + log(W + 1) + F), including timer reinsertion |
-| Wake CFS peer | O(S + log(W + 1) + F + R log(R + 1)); the existing CFS enqueue path rebuilds its run tree |
+| Register indefinite operation | O(log(W + 1) + F) waiter/timer work and O(1) suspended-list insertion |
+| Register timed operation | O(log(W + 1) + log(B + 1) + F) waiter/timeout/timer work |
+| Wake RT peer | O(S + log(W + 1) + G + F), including timer reinsertion |
+| Wake CFS peer | O(S + log(W + 1) + G + F + R log(R + 1)); the existing CFS enqueue path rebuilds its run tree |
+| Cancel or expire one wait | O(log(W + 1) + G + F), plus R log(R + 1) for a CFS thread |
+
+A peer operation can additionally complete expired waiters encountered before
+the first live waiter. Add the per-wait cleanup/wakeup cost for each such entry.
+An absolute deadline is retained across retries; no new relative timeout is
+allocated or restarted on notification.
 
 Availability checks and ring storage do not grow with queue capacity, although
 larger buffers can change cache behavior on a host. Blocking calls add repeated
@@ -220,8 +298,9 @@ Storage is `N * size_of::<T>()`, six machine words of current metadata (head,
 length, and two tree roots/counts), plus alignment padding. This is about 24 bytes
 of metadata on the 32-bit target and 48 on the 64-bit host; Rust struct layout is
 not a stable ABI. For `MessageQueue<u32, 16>` the current target size is 88 bytes
-on Cortex-M and the measured host size is 112 bytes. No per-thread memory is
-added. A blocked send also retains its ordinary `T` argument on the thread stack.
+on Cortex-M and the measured host size is 112 bytes. Timeout/cancellation state
+is stored per thread as described above. A blocked send also retains its ordinary
+`T` argument on the thread stack.
 
 ### Native microbenchmark
 
@@ -255,9 +334,19 @@ host load, compiler specialization, and payload layout affect results.
 
 `examples/message_queue.rs` runs a CFS producer and a slower periodic RT
 consumer through a four-slot queue. Sequence numbers and error counters make
-FIFO delivery and overflow-free backpressure observable. Startup lets the RT
-consumer wait for the first message; after sustained production, the bounded
-queue also causes the producer to wait for space.
+FIFO delivery and overflow-free backpressure observable. Before sample traffic,
+the producer fills a separate one-slot probe queue and calls `send_timeout`,
+while the consumer calls `receive_timeout` on an empty control queue. Both
+10 ms waits expire. The consumer then starts an indefinite control-queue
+receive; the producer retries `cancel_wait(consumer_handle)` until that wait is
+registered and cancelled. The consumer observes `Cancelled` and continues
+running.
+
+Normal sample traffic uses `send_timeout` and `receive_timeout` with 25 ms
+deadlines. The slower consumer eventually fills the queue, so producer waits
+can expire between consumer releases. A timed-out send retries the same sequence
+number on the next iteration; expected timeouts are counted separately from
+errors.
 
 Build with the board's existing linker memory map:
 
@@ -277,6 +366,11 @@ no-waiter `u32` send/receive pairs. Inspect these debugger symbols:
 - `PRODUCED`, `CONSUMED`: progress; a small difference is expected from buffering
   and from preemption between enqueue and the producer's counter update;
 - `SEQUENCE_ERRORS`, `MESSAGE_ERRORS`: should stay zero;
+- `SEND_TIMEOUTS`, `RECEIVE_TIMEOUTS`: each reaches at least one during startup;
+  additional sample-traffic timeouts are expected and do not indicate failure;
+- `CANCEL_REQUESTS`, `CANCELLED_RECEIVES`: each reaches one after the startup
+  cancellation; a successful request wakes the consumer, which records the
+  result when it resumes;
 - `LAST_DELIVERY_CYCLES`: time from constructing a sample to consuming it,
   including producer backpressure, buffering, scheduling, and preemption.
 
@@ -291,12 +385,16 @@ cross-compiled, not flashed or executed on a board.
 
 ## Validation
 
-`tests/test_message.rs` covers capacity one, full/empty errors, zero capacity, zero-size
+`tests/test_messageq.rs` covers capacity one, full/empty errors, zero capacity, zero-size
 payloads, repeated wraparound against a FIFO model, and multi-producer/consumer
 native delivery without duplicates or omissions. Scheduler tests cover CFS and RT
 blocking in both directions, reblocking after a competitor uses the resource,
 deadline/address wake ordering, independent queues, event tags, and invalid
-blocking contexts. A compile-fail doctest rejects sharing non-`Send` payloads.
+blocking contexts. Timeout/cancellation tests exercise both thread classes and
+both directions, deadline boundaries, late dispatch, reblocking without timeout
+extension, pending timer interrupts, long tick deadlines, cancellation isolation,
+operation reuse, and reentrant publication during registration. A compile-fail
+doctest rejects sharing non-`Send` payloads.
 
 Scheduler tests inject deterministic work at the point where the embedded caller
 would context-switch; they verify the actual block/retry/wake code without
@@ -305,8 +403,8 @@ mutex, and wait-queue suites remain part of regression validation.
 
 Validation completed for this implementation:
 
-- Default native suite: 140 integration tests and two doctests passed.
-- Native library/tests with all features: 143 tests passed. Select `--lib --tests`
+- Native suite with `--features host`: 160 integration tests and two doctests passed.
+- Native library/tests with all features: 163 tests passed. Select `--lib --tests`
   with `--all-features` on the host; the `embedded-examples` feature enables
   firmware programs whose panic handlers are incompatible with native `std`.
 - All embedded examples passed `cargo check` for `thumbv8m.main-none-eabihf`.
