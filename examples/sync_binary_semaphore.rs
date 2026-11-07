@@ -92,8 +92,6 @@ extern "C" fn contender_b(_arg: *mut c_void) -> ! {
 
 extern "C" fn rt_thread1_runner(_arg: *mut c_void) -> ! {
     loop {
-        rtsched::set_rt_thread_start_time(0);
-
         if SIGNAL.take().is_err() {
             rtsched::yieldyi();
             continue;

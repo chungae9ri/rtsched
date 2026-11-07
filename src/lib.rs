@@ -57,7 +57,7 @@ pub(crate) fn critical_section<R>(f: impl FnOnce() -> R) -> R {
 mod clock;
 mod diagnostics;
 mod ktimer;
-mod message;
+mod messageq;
 #[doc(hidden)]
 pub mod print;
 mod rbtree;
@@ -76,12 +76,12 @@ pub use thread::{
     AlignedStack, CfsSchedInfo, CfsThread, CfsThreadBuilder, IdleThread, RtThread, RtThreadBuilder,
     ThreadCtx, ThreadEntry, ThreadHandle, ThreadId, ThreadKind, ThreadRef, ThreadSpawnError,
     ThreadStart, ThreadState, current_rt_thread_runtime, current_thread, current_thread_id,
-    msleepyi, set_rt_thread_start_time, yieldyi,
+    msleepyi, yieldyi,
 };
 
 pub use clock::{sys_clk_freq, ticks_per_ms, update_sys_clk_freq};
 
-pub use message::{MessageQueue, MessageQueueStatus};
+pub use messageq::{MessageQueue, MessageQueueStatus};
 
 pub use print::set_print_fn;
 

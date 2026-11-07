@@ -1,6 +1,11 @@
 use rtsched::test_support::ktimer;
 
 #[test]
+fn timer_clock_does_not_recharge_a_software_yield() {
+    ktimer::timer_clock_does_not_recharge_a_software_yield();
+}
+
+#[test]
 fn reload_from_ticks_converts_to_scheduler_timer_reload() {
     ktimer::reload_from_ticks_converts_to_scheduler_timer_reload();
 }
@@ -123,8 +128,8 @@ fn rt_yield_marks_timer_inactive_and_preserves_remaining_period() {
 }
 
 #[test]
-fn rt_yield_with_reset_runtime_finishes_current_job_window() {
-    ktimer::rt_yield_with_reset_runtime_finishes_current_job_window();
+fn yieldyi_resets_rt_runtime_after_scheduling_next_release() {
+    ktimer::yieldyi_resets_rt_runtime_after_scheduling_next_release();
 }
 
 #[test]

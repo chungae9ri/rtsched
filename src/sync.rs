@@ -76,10 +76,20 @@ const WAIT_FOREVER_TICKS: u64 = u64::MAX;
 
 pub(crate) type WaitTree = RBTree<SyncEntity>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageWaitResult {
+    Pending,
+    Notified,
+    TimedOut,
+    Cancelled,
+}
+
 #[repr(C)]
 pub(crate) struct SyncEntity {
     deadline_at: u64,
     rb_node: RbNode,
+    message_wait_tree: *mut WaitTree,
+    message_wait_result: MessageWaitResult,
 }
 
 impl SyncEntity {
@@ -87,6 +97,8 @@ impl SyncEntity {
         Self {
             deadline_at: 0,
             rb_node: RbNode::new(),
+            message_wait_tree: ptr::null_mut(),
+            message_wait_result: MessageWaitResult::Notified,
         }
     }
 
@@ -713,6 +725,14 @@ pub(crate) unsafe fn block_current_thread(
     thread: ThreadHandle,
     sync_type: SyncType,
 ) -> Result<u64, WaitQueueError> {
+    unsafe { block_current_thread_until(thread, sync_type, WAIT_FOREVER_TICKS) }
+}
+
+pub(crate) unsafe fn block_current_thread_until(
+    thread: ThreadHandle,
+    sync_type: SyncType,
+    wake_at: u64,
+) -> Result<u64, WaitQueueError> {
     unsafe {
         let current_thread_ctx = CURRENT_THREAD_CTX;
 
@@ -738,7 +758,7 @@ pub(crate) unsafe fn block_current_thread(
         let _ = yield_ktimer(current_ktimer, elapsed, false);
 
         let wait_entity = wait_entity(thread);
-        (*wait_entity).wake_at = WAIT_FOREVER_TICKS;
+        (*wait_entity).wake_at = wake_at;
         (*wait_entity).waitevt = Some(sync_type);
 
         match (*thread.as_ptr()).kind {
@@ -776,6 +796,54 @@ pub(crate) unsafe fn insert_sync_waiter(
         (*entity).set_deadline_at(deadline_at);
         (*entity).reset_links();
         waiters.insert(entity);
+    }
+}
+
+// Message waits have two independent intrusive memberships. Remember their
+// object tree so timer expiry can unlink it before making the thread runnable.
+// The queue remains borrowed by the suspended send/receive call while linked.
+pub(crate) unsafe fn insert_message_waiter(
+    waiters: &mut WaitTree,
+    thread: ThreadHandle,
+    deadline_at: u64,
+) {
+    unsafe {
+        let entity = sync_entity(thread);
+        debug_assert!((*entity).message_wait_tree.is_null());
+        insert_sync_waiter(waiters, thread, deadline_at);
+        (*entity).message_wait_tree = waiters;
+        (*entity).message_wait_result = MessageWaitResult::Pending;
+    }
+}
+
+pub(crate) unsafe fn message_wait_tree(thread: ThreadHandle) -> *mut WaitTree {
+    unsafe { (*sync_entity(thread)).message_wait_tree }
+}
+
+// Caller serializes scheduler access. This only unlinks the object tree; the
+// caller must also remove/pop the global wait entry and restore runnable state.
+pub(crate) unsafe fn finish_message_wait(thread: ThreadHandle, result: MessageWaitResult) -> bool {
+    unsafe {
+        let entity = sync_entity(thread);
+        let tree = (*entity).message_wait_tree;
+        if tree.is_null() {
+            return false;
+        }
+        (*tree).remove(entity);
+        (*entity).message_wait_tree = ptr::null_mut();
+        (*entity).message_wait_result = result;
+        true
+    }
+}
+
+pub(crate) unsafe fn take_message_wait_result(thread: ThreadHandle) -> MessageWaitResult {
+    unsafe {
+        let entity = sync_entity(thread);
+        debug_assert!((*entity).message_wait_tree.is_null());
+        core::mem::replace(
+            &mut (*entity).message_wait_result,
+            MessageWaitResult::Notified,
+        )
     }
 }
 

@@ -974,19 +974,6 @@ pub fn current_thread_id() -> Option<ThreadId> {
     })
 }
 
-pub fn set_rt_thread_start_time(start_time: u32) -> bool {
-    unsafe {
-        if !CURRENT_THREAD_CTX.is_null() && (*CURRENT_THREAD_CTX).is_rt() {
-            let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
-            let rt_thread = rt_thread_from_handle(current_thread);
-            (*rt_thread).runtime = start_time;
-            true
-        } else {
-            false
-        }
-    }
-}
-
 pub fn current_rt_thread_runtime() -> Option<u32> {
     critical_section(|| unsafe {
         if CURRENT_THREAD_CTX.is_null() || !(*CURRENT_THREAD_CTX).is_rt() {
@@ -1004,6 +991,10 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
 ///
 /// This is intended for the threads that have completed their current
 /// job and want to give a chance to next scheduled thread.
+/// For an RT thread, the scheduler accounts the final elapsed interval and
+/// computes the next periodic release before resetting runtime to zero.
+/// Application code does not need to reset runtime at the start of a job.
+/// Sleeping or blocking within a job preserves its accumulated runtime.
 pub fn yieldyi() {
     critical_section(|| unsafe {
         let elapsed: u32 = elapsed_ticks_since_current_reload();

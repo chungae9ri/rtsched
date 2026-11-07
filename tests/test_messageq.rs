@@ -1,4 +1,4 @@
-use rtsched::{MessageQueue, MessageQueueStatus, test_support::message};
+use rtsched::{MessageQueue, MessageQueueStatus, test_support::messageq};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -137,42 +137,42 @@ fn multiple_host_producers_and_consumers_deliver_each_message_once() {
 
 #[test]
 fn cfs_receiver_suspends_and_resumes_with_message() {
-    message::cfs_receiver_suspends_and_resumes_with_message();
+    messageq::cfs_receiver_suspends_and_resumes_with_message();
 }
 
 #[test]
 fn cfs_sender_suspends_until_space_is_available() {
-    message::cfs_sender_suspends_until_space_is_available();
+    messageq::cfs_sender_suspends_until_space_is_available();
 }
 
 #[test]
 fn rt_receiver_retries_after_another_consumer_takes_the_message() {
-    message::rt_receiver_retries_after_another_consumer_takes_the_message();
+    messageq::rt_receiver_retries_after_another_consumer_takes_the_message();
 }
 
 #[test]
 fn rt_sender_retries_after_another_producer_fills_the_slot() {
-    message::rt_sender_retries_after_another_producer_fills_the_slot();
+    messageq::rt_sender_retries_after_another_producer_fills_the_slot();
 }
 
 #[test]
 fn queue_waiters_wake_by_deadline_and_address_in_both_directions() {
-    message::queue_waiters_wake_by_deadline_and_address_in_both_directions();
+    messageq::queue_waiters_wake_by_deadline_and_address_in_both_directions();
 }
 
 #[test]
 fn queues_do_not_wake_each_others_waiters() {
-    message::queues_do_not_wake_each_others_waiters();
+    messageq::queues_do_not_wake_each_others_waiters();
 }
 
 #[test]
 fn mixed_cfs_and_rt_waiters_share_deadline_ordering() {
-    message::mixed_cfs_and_rt_waiters_share_deadline_ordering();
+    messageq::mixed_cfs_and_rt_waiters_share_deadline_ordering();
 }
 
 #[test]
 fn invalid_blocking_context_leaves_messages_and_waiters_unchanged() {
-    message::invalid_blocking_context_leaves_messages_and_waiters_unchanged();
+    messageq::invalid_blocking_context_leaves_messages_and_waiters_unchanged();
 }
 
 #[test]
@@ -187,4 +187,77 @@ fn message_queue_event_tags_round_trip() {
             Some(kind)
         );
     }
+}
+
+#[test]
+fn zero_timeout_is_nonblocking_and_preserves_fifo() {
+    let _guard = rtsched::test_support::TEST_LOCK.lock().unwrap();
+    let queue = MessageQueue::<u32, 1>::new();
+    assert_eq!(queue.receive_timeout(0), Err(MessageQueueStatus::TimedOut));
+    assert_eq!(queue.send_timeout(1, 0), Ok(()));
+    assert_eq!(queue.send_timeout(2, 0), Err(MessageQueueStatus::TimedOut));
+    assert_eq!(queue.receive_timeout(0), Ok(1));
+    assert_eq!(queue.send_timeout(3, 10), Ok(()));
+    assert_eq!(queue.receive_timeout(10), Ok(3));
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn timed_waits_expire_and_leave_both_wait_indexes() {
+    messageq::timed_waits_expire_and_leave_both_wait_indexes();
+}
+
+#[test]
+fn timed_waits_succeed_before_deadline() {
+    messageq::timed_waits_succeed_before_deadline();
+}
+
+#[test]
+fn timeout_deadlines_survive_reblocking() {
+    messageq::timeout_deadlines_survive_reblocking();
+}
+
+#[test]
+fn cancellation_cleans_up_cfs_and_rt_operations() {
+    messageq::cancellation_cleans_up_cfs_and_rt_operations();
+}
+
+#[test]
+fn expired_waiters_do_not_steal_peer_wakeups() {
+    messageq::expired_waiters_do_not_steal_peer_wakeups();
+}
+
+#[test]
+fn timeout_wins_cancellation_at_deadline() {
+    messageq::timeout_wins_cancellation_at_deadline();
+}
+
+#[test]
+fn long_timeouts_keep_u64_deadlines() {
+    messageq::long_timeouts_keep_u64_deadlines();
+}
+
+#[test]
+fn cancellation_ignores_non_message_waits_and_idle_threads() {
+    messageq::cancellation_ignores_non_message_waits_and_idle_threads();
+}
+
+#[test]
+fn timed_wait_context_errors_do_not_register_waiters() {
+    messageq::timed_wait_context_errors_do_not_register_waiters();
+}
+
+#[test]
+fn notified_wait_can_timeout_before_dispatch() {
+    messageq::notified_wait_can_timeout_before_dispatch();
+}
+
+#[test]
+fn staggered_timeouts_and_cancellation_preserve_remaining_waiters() {
+    messageq::staggered_timeouts_and_cancellation_preserve_remaining_waiters();
+}
+
+#[test]
+fn reentrant_publish_during_block_registration_is_not_lost() {
+    messageq::reentrant_publish_during_block_registration_is_not_lost();
 }

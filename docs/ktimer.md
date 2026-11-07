@@ -47,8 +47,19 @@ nearest writable SysTick reload value. Long expiration times remain stored as ab
 programmed chunk and the scheduler reprograms the next chunk until the absolute
 deadline is reached.
 
+The scheduler tracks the hardware reload epoch separately from time already
+charged by a cooperative yield. Reading the current time before PendSV
+reprograms the timer does not add those elapsed ticks again. Message-queue
+timeouts use this clock, including partial timer intervals, and keep one
+absolute deadline across retries.
+
 When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
 `runtime`. The inactive RT timer is parked until the next `period_ticks` release.
+The scheduler accounts the final elapsed interval and calculates that release
+using the completed job's runtime before clearing the counter. Application code
+does not need to reset runtime at job entry. Sleeping or blocking within the
+same job preserves accumulated runtime; the scheduler also initializes runtime
+at thread creation and resets it when dispatching a periodic release.
 
 Each timer's embedded `RbNode` belongs to exactly one of the two trees. Active
 timers are eligible for scheduler selection; inactive timers track future
