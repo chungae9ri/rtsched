@@ -158,7 +158,7 @@ pub fn blocking_sync_take_copies_current_scheduler_deadline() {
         reset_scheduler_state();
         let handle = make_running_cfs(&mut thread);
 
-        assert_eq!(semaphore.take(), Ok(()));
+        assert_eq!(semaphore.take_with_context(true), Ok(()));
 
         assert_eq!((*sync_entity(handle)).deadline_at(), 25);
 
@@ -192,7 +192,9 @@ pub fn mutex_lock_boosts_rt_owner_deadline_and_unlock_restores_it() {
         make_running_rt(&mut waiter)
     };
 
-    let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+    let waiter_guard = mutex
+        .lock_with_context(true)
+        .expect("waiter should block on mutex");
 
     unsafe {
         assert_eq!(waiter.thread.state, ThreadState::Suspended);
@@ -245,7 +247,9 @@ pub fn mutex_lock_boosts_rt_owner_to_earliest_scheduler_deadline_and_unlock_rest
         make_running_rt(&mut waiter)
     };
 
-    let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+    let waiter_guard = mutex
+        .lock_with_context(true)
+        .expect("waiter should block on mutex");
 
     unsafe {
         assert_eq!(waiter.thread.state, ThreadState::Suspended);
@@ -294,7 +298,9 @@ pub fn mutex_lock_boosts_cfs_owner_to_earliest_scheduler_deadline_and_unlock_res
         make_running_rt(&mut waiter);
     }
 
-    let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+    let waiter_guard = mutex
+        .lock_with_context(true)
+        .expect("waiter should block on mutex");
 
     unsafe {
         assert_eq!(waiter.thread.state, ThreadState::Suspended);
@@ -342,7 +348,7 @@ pub fn binary_semaphore_take_blocks_current_cfs_thread_until_give() {
         reset_scheduler_state();
         let handle = make_running_cfs(&mut thread);
 
-        assert_eq!(semaphore.take(), Ok(()));
+        assert_eq!(semaphore.take_with_context(true), Ok(()));
 
         assert_eq!(thread.thread.state, ThreadState::Suspended);
         assert!(!semaphore.is_available());
@@ -407,7 +413,7 @@ pub fn counting_semaphore_take_blocks_current_cfs_thread_until_give() {
         reset_scheduler_state();
         let handle = make_running_cfs(&mut thread);
 
-        assert_eq!(semaphore.take(), Ok(()));
+        assert_eq!(semaphore.take_with_context(true), Ok(()));
 
         assert_eq!(thread.thread.state, ThreadState::Suspended);
         assert_eq!(semaphore.count(), 0);
@@ -468,7 +474,7 @@ pub fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
         for thread in [later_ptr, earlier_ptr] {
             (*thread).set_state(ThreadState::Running);
             CURRENT_THREAD_CTX = thread;
-            assert_eq!(semaphore.take(), Ok(()));
+            assert_eq!(semaphore.take_with_context(true), Ok(()));
             assert_eq!((*thread).state, ThreadState::Suspended);
         }
         assert!((*WAIT_QUEUE.get()).is_empty());
@@ -482,7 +488,7 @@ pub fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
 
         (*earlier_ptr).set_state(ThreadState::Running);
         CURRENT_THREAD_CTX = earlier_ptr;
-        assert_eq!(semaphore.take(), Ok(()));
+        assert_eq!(semaphore.take_with_context(true), Ok(()));
         assert_blocked_names(&["later", "earlier"]);
         assert_eq!(semaphore.give(), Ok(()));
         assert_eq!((*earlier_ptr).state, ThreadState::Ready);
@@ -586,7 +592,9 @@ pub fn mutex_lock_blocks_waiter_and_drop_transfers_ownership() {
     unsafe {
         owner.thread.set_state(ThreadState::Ready);
         let waiter_handle = make_running_cfs(&mut waiter);
-        let waiter_guard = mutex.lock().expect("waiter should block on mutex");
+        let waiter_guard = mutex
+            .lock_with_context(true)
+            .expect("waiter should block on mutex");
 
         assert_eq!(waiter.thread.state, ThreadState::Suspended);
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
@@ -635,6 +643,208 @@ pub fn mutex_lock_without_current_thread_reports_error() {
 
     assert!(matches!(mutex.try_lock(), Err(MutexError::NoCurrentThread)));
     assert!(matches!(mutex.lock(), Err(MutexError::NoCurrentThread)));
+}
+
+pub fn semaphores_reject_invalid_blocking_context_without_changing_state() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let binary = BinarySemaphore::empty();
+    let counting = CountingSemaphore::empty(2);
+    let mut thread = cfs_thread("current", 3);
+
+    unsafe {
+        reset_scheduler_state();
+        let handle = make_running_cfs(&mut thread);
+        let priority_sum = *CFS_RUN_QUEUE.priority_sum();
+        let next = next_ktimer();
+
+        // Public host calls cannot park a scheduler thread, including when nested.
+        critical_section(|| {
+            assert_eq!(binary.take(), Err(SemaphoreError::InvalidContext));
+            assert_eq!(counting.take(), Err(SemaphoreError::InvalidContext));
+        });
+
+        for (state, can_block) in [
+            (ThreadState::Running, false),
+            (ThreadState::Ready, true),
+            (ThreadState::Waiting, true),
+            (ThreadState::Suspended, true),
+        ] {
+            thread.thread.state = state;
+            assert_eq!(
+                binary.take_with_context(can_block),
+                Err(SemaphoreError::InvalidContext)
+            );
+            assert_eq!(
+                counting.take_with_context(can_block),
+                Err(SemaphoreError::InvalidContext)
+            );
+            assert_eq!(thread.thread.state, state);
+            assert_eq!((*wait_entity(handle)).waitevt, None);
+            assert_eq!((*sync_entity(handle)).deadline_at(), 0);
+            assert!((*binary.state.get()).waiters.is_empty());
+            assert!((*counting.state.get()).waiters.is_empty());
+            assert!(!binary.is_available());
+            assert_eq!(counting.count(), 0);
+            assert_eq!(*CFS_RUN_QUEUE.priority_sum(), priority_sum);
+            assert_eq!(next_ktimer(), next);
+            assert_blocked_names(&[]);
+        }
+
+        binary.give().unwrap();
+        counting.give().unwrap();
+        assert!(binary.is_available());
+        assert_eq!(counting.count(), 1);
+        reset_scheduler_state();
+    }
+}
+
+pub fn mutex_rejects_invalid_blocking_context_without_changing_owner_or_deadlines() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mutex = Mutex::new(7);
+    let mut owner = rt_thread("owner");
+    let mut owner_timer = RtKTimer::new(100, ptr::null_mut(), "owner");
+    let mut waiter = rt_thread("waiter");
+    let mut waiter_timer = RtKTimer::new(10, ptr::null_mut(), "waiter");
+
+    unsafe {
+        reset_scheduler_state();
+        owner_timer.init_rt_ktimer(&mut owner.thread);
+        waiter_timer.init_rt_ktimer(&mut waiter.thread);
+        enqueue_ktimer(owner_timer.entity_mut());
+        enqueue_ktimer(waiter_timer.entity_mut());
+        make_running_rt(&mut owner);
+    }
+    let owner_guard = mutex.lock().unwrap();
+
+    unsafe {
+        owner.thread.set_state(ThreadState::Ready);
+        let waiter_handle = make_running_rt(&mut waiter);
+        let owner_token_before = load_word(&(*mutex.state.get()).owner);
+        let next = next_ktimer();
+
+        critical_section(|| {
+            assert!(matches!(mutex.lock(), Err(MutexError::InvalidContext)));
+        });
+
+        for (state, can_block) in [
+            (ThreadState::Running, false),
+            (ThreadState::Ready, true),
+            (ThreadState::Waiting, true),
+            (ThreadState::Suspended, true),
+        ] {
+            waiter.thread.state = state;
+            assert!(matches!(
+                mutex.lock_with_context(can_block),
+                Err(MutexError::InvalidContext)
+            ));
+            assert_eq!(waiter.thread.state, state);
+            assert_eq!((*wait_entity(waiter_handle)).waitevt, None);
+            assert_eq!((*sync_entity(waiter_handle)).deadline_at(), 0);
+            assert_eq!(load_word(&(*mutex.state.get()).owner), owner_token_before);
+            assert!((*mutex.state.get()).waiters.is_empty());
+            assert!(!(*mutex.state.get()).owner_boosted);
+            assert_eq!(owner_timer.entity.expire_at(), 100);
+            assert_eq!(waiter_timer.entity.expire_at(), 10);
+            assert!(owner_timer.entity.is_active());
+            assert!(waiter_timer.entity.is_active());
+            assert_eq!(next_ktimer(), next);
+            assert_blocked_names(&[]);
+        }
+
+        owner.thread.set_state(ThreadState::Running);
+        CURRENT_THREAD_CTX = &mut owner.thread;
+    }
+    assert_eq!(*owner_guard, 7);
+    drop(owner_guard);
+    assert!(!mutex.is_locked());
+    unsafe { reset_scheduler_state() };
+}
+
+pub fn sync_blocking_calls_reject_idle_thread() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let binary = BinarySemaphore::empty();
+    let counting = CountingSemaphore::empty(2);
+    let mutex = Mutex::new(7);
+    let mut owner = cfs_thread("owner", 3);
+    let mut idle = crate::thread::IdleThread {
+        thread: ThreadCtx {
+            sp: 0,
+            exc_return: 0,
+            id: 0,
+            name: "idle",
+            state: ThreadState::Running,
+            kind: ThreadKind::Idle,
+        },
+    };
+
+    unsafe {
+        reset_scheduler_state();
+        make_running_cfs(&mut owner);
+    }
+    let owner_guard = mutex.lock().unwrap();
+
+    unsafe {
+        owner.thread.set_state(ThreadState::Ready);
+        CURRENT_THREAD_CTX = &mut idle.thread;
+        CURRENT_THREAD_IS_CFS = false;
+    }
+    assert_eq!(
+        binary.take_with_context(true),
+        Err(SemaphoreError::InvalidContext)
+    );
+    assert_eq!(
+        counting.take_with_context(true),
+        Err(SemaphoreError::InvalidContext)
+    );
+    assert!(matches!(
+        mutex.lock_with_context(true),
+        Err(MutexError::InvalidContext)
+    ));
+    assert_eq!(idle.thread.state, ThreadState::Running);
+    assert_blocked_names(&[]);
+    unsafe {
+        assert!((*binary.state.get()).waiters.is_empty());
+        assert!((*counting.state.get()).waiters.is_empty());
+        assert!((*mutex.state.get()).waiters.is_empty());
+        owner.thread.set_state(ThreadState::Running);
+        CURRENT_THREAD_CTX = &mut owner.thread;
+        CURRENT_THREAD_IS_CFS = true;
+    }
+    drop(owner_guard);
+    unsafe { reset_scheduler_state() };
+}
+
+pub fn sync_immediate_acquisition_succeeds_when_blocking_is_unavailable() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let binary = BinarySemaphore::available();
+    let counting = CountingSemaphore::full(2);
+    let mutex = Mutex::new(41);
+    let mut thread = cfs_thread("owner", 3);
+
+    unsafe { reset_scheduler_state() };
+    critical_section(|| {
+        critical_section(|| {
+            // Tokens can be acquired even before a scheduler thread is selected.
+            assert_eq!(binary.take(), Ok(()));
+            assert_eq!(counting.take(), Ok(()));
+            assert_eq!(counting.take(), Ok(()));
+        });
+    });
+    assert!(!binary.is_available());
+    assert_eq!(counting.count(), 0);
+
+    unsafe { make_running_cfs(&mut thread) };
+    critical_section(|| {
+        critical_section(|| {
+            let mut guard = mutex.lock().unwrap();
+            *guard += 1;
+            assert!(matches!(mutex.lock(), Err(MutexError::WouldDeadlock)));
+        });
+    });
+    assert!(!mutex.is_locked());
+    assert_eq!(*mutex.try_lock().unwrap(), 42);
+    assert_blocked_names(&[]);
+    unsafe { reset_scheduler_state() };
 }
 
 pub fn mutex_unique_access_helpers_skip_scheduler_locking() {

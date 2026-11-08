@@ -10,7 +10,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::arch::platform::request_context_switch;
+use crate::arch::platform::{blocking_context_available, request_context_switch};
 use crate::critical_section;
 use crate::ktimer::{
     CFS_KTIMER, dequeue_ktimerq_to_waitq, earliest_queued_scheduler_expire_at,
@@ -21,7 +21,8 @@ use crate::rbtree::{RBTree, RBTreeNode, RbNode};
 use crate::runq::{dequeue_runq_to_waitq, enqueue_runq_from_waitq};
 use crate::sched::CURRENT_THREAD_CTX;
 use crate::thread::{
-    ThreadHandle, ThreadKind, rt_ktimer_entity, sync_entity, thread_handle_from_sync_entity,
+    ThreadHandle, ThreadKind, ThreadState, rt_ktimer_entity, sync_entity,
+    thread_handle_from_sync_entity,
 };
 use crate::waitq::{WaitQueueError, remove_wait_thread, wait_entity};
 
@@ -174,6 +175,8 @@ pub enum SemaphoreError {
     Full,
     /// A blocking take was requested before the scheduler selected a thread.
     NoCurrentThread,
+    /// Waiting requires a running, non-idle thread with context switching available.
+    InvalidContext,
     /// The scheduler could not move a thread between wait and ready queues.
     WaitQueue(WaitQueueError),
 }
@@ -256,7 +259,18 @@ impl BinarySemaphore {
     }
 
     /// Take the semaphore, blocking the current scheduler thread if needed.
+    ///
+    /// If unavailable, returns [`SemaphoreError::InvalidContext`] unless called
+    /// by a running, non-idle thread with PendSV unmasked. Do not wait from an
+    /// interrupt handler or an outer critical section. Immediate acquisition
+    /// succeeds even when blocking is unavailable. If waiting is required with
+    /// no selected thread, returns [`SemaphoreError::NoCurrentThread`]. Native
+    /// host builds cannot block scheduler threads.
     pub fn take(&self) -> Result<(), SemaphoreError> {
+        self.take_with_context(blocking_context_available())
+    }
+
+    fn take_with_context(&self, can_block: bool) -> Result<(), SemaphoreError> {
         if self.try_take().is_ok() {
             return Ok(());
         }
@@ -270,6 +284,12 @@ impl BinarySemaphore {
             let Some(current_thread) = current_thread_handle() else {
                 return Err(SemaphoreError::NoCurrentThread);
             };
+            if !can_block
+                || (*current_thread.as_ptr()).state != ThreadState::Running
+                || (*current_thread.as_ptr()).is_idle()
+            {
+                return Err(SemaphoreError::InvalidContext);
+            }
 
             block_current_thread_on(state, current_thread)?;
             Ok(())
@@ -389,7 +409,18 @@ impl CountingSemaphore {
     }
 
     /// Take one token, blocking the current scheduler thread if needed.
+    ///
+    /// If unavailable, returns [`SemaphoreError::InvalidContext`] unless called
+    /// by a running, non-idle thread with PendSV unmasked. Do not wait from an
+    /// interrupt handler or an outer critical section. Immediate acquisition
+    /// succeeds even when blocking is unavailable. If waiting is required with
+    /// no selected thread, returns [`SemaphoreError::NoCurrentThread`]. Native
+    /// host builds cannot block scheduler threads.
     pub fn take(&self) -> Result<(), SemaphoreError> {
+        self.take_with_context(blocking_context_available())
+    }
+
+    fn take_with_context(&self, can_block: bool) -> Result<(), SemaphoreError> {
         if self.try_take().is_ok() {
             return Ok(());
         }
@@ -403,6 +434,12 @@ impl CountingSemaphore {
             let Some(current_thread) = current_thread_handle() else {
                 return Err(SemaphoreError::NoCurrentThread);
             };
+            if !can_block
+                || (*current_thread.as_ptr()).state != ThreadState::Running
+                || (*current_thread.as_ptr()).is_idle()
+            {
+                return Err(SemaphoreError::InvalidContext);
+            }
 
             block_current_thread_on(state, current_thread)?;
             Ok(())
@@ -442,6 +479,8 @@ pub enum MutexError {
     WouldDeadlock,
     /// A lock was requested before the scheduler selected a thread.
     NoCurrentThread,
+    /// Waiting requires a running, non-idle thread with context switching available.
+    InvalidContext,
     /// The scheduler could not move a thread between wait and ready queues.
     WaitQueue(WaitQueueError),
 }
@@ -534,7 +573,20 @@ impl<T> Mutex<T> {
     }
 
     /// Lock the mutex, blocking the current scheduler thread if needed.
+    ///
+    /// If owned by another thread, returns [`MutexError::InvalidContext`]
+    /// unless called by a running, non-idle thread with PendSV unmasked. Do not
+    /// wait from an interrupt handler or an outer critical section. An unlocked
+    /// mutex can still be acquired when blocking is unavailable, provided a
+    /// scheduler thread is selected. Otherwise returns
+    /// [`MutexError::NoCurrentThread`]. Recursive locking returns
+    /// [`MutexError::WouldDeadlock`]. Native host builds cannot block scheduler
+    /// threads.
     pub fn lock(&self) -> Result<MutexGuard<'_, T>, MutexError> {
+        self.lock_with_context(blocking_context_available())
+    }
+
+    fn lock_with_context(&self, can_block: bool) -> Result<MutexGuard<'_, T>, MutexError> {
         critical_section(|| unsafe {
             let current_thread = current_thread_handle().ok_or(MutexError::NoCurrentThread)?;
             let state = &mut *self.state.get();
@@ -546,6 +598,12 @@ impl<T> Mutex<T> {
                     return Err(MutexError::WouldDeadlock);
                 }
                 Err(owner) => {
+                    if !can_block
+                        || (*current_thread.as_ptr()).state != ThreadState::Running
+                        || (*current_thread.as_ptr()).is_idle()
+                    {
+                        return Err(MutexError::InvalidContext);
+                    }
                     let waiter_deadline_at = block_current_thread_on(state, current_thread)?;
                     boost_owner_deadline(state, owner, current_thread, waiter_deadline_at);
                 }
