@@ -98,6 +98,26 @@ fn mutex_lock_without_current_thread_reports_error() {
 }
 
 #[test]
+fn semaphores_reject_invalid_blocking_context_without_changing_state() {
+    sync::semaphores_reject_invalid_blocking_context_without_changing_state();
+}
+
+#[test]
+fn mutex_rejects_invalid_blocking_context_without_changing_owner_or_deadlines() {
+    sync::mutex_rejects_invalid_blocking_context_without_changing_owner_or_deadlines();
+}
+
+#[test]
+fn sync_blocking_calls_reject_idle_thread() {
+    sync::sync_blocking_calls_reject_idle_thread();
+}
+
+#[test]
+fn sync_immediate_acquisition_succeeds_when_blocking_is_unavailable() {
+    sync::sync_immediate_acquisition_succeeds_when_blocking_is_unavailable();
+}
+
+#[test]
 fn mutex_unique_access_helpers_skip_scheduler_locking() {
     sync::mutex_unique_access_helpers_skip_scheduler_locking();
 }
