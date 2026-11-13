@@ -429,7 +429,7 @@ pub(crate) unsafe fn wake_wait_thread(queue: &mut KTimerQueue, elapsed: u32) {
             let wait_thread_ptr = wait_thread.as_ptr();
 
             finish_message_wait(wait_thread, MessageWaitResult::TimedOut);
-            (*wait_thread_ptr).set_state(ThreadState::Ready);
+            (*wait_thread_ptr).set_state(ThreadState::ReadyActive);
             crate::diagnostics::trace::record_wakeup(wait_thread_ptr);
             if (*wait_thread_ptr).is_cfs() {
                 enqueue_runq_from_waitq(wait_thread);
@@ -547,7 +547,7 @@ pub(crate) fn enqueue_ktimerq_from_waitq(thread: ThreadHandle) -> Result<(), Wai
 
         remove_wait_thread(thread);
 
-        (*thread_ptr).set_state(ThreadState::Ready);
+        (*thread_ptr).set_state(ThreadState::ReadyActive);
         crate::diagnostics::trace::record_wakeup(thread_ptr);
         reinsert_ktimer(ktimer_entity);
         program_wait_ktimer();
@@ -786,6 +786,7 @@ pub(crate) unsafe fn yield_ktimer(
             if reset_runtime {
                 (*current_rt_thread).runtime = 0;
             }
+            (*current_rt_thread_ctx).set_state(ThreadState::ReadyInactive);
         }
 
         queue.advance_time(elapsed);
@@ -1064,6 +1065,9 @@ impl KTimerQueue {
                     (*rt_thread).runtime = 0;
                     (*expired)
                         .set_expire_after(self.now_ticks, (*expired).relative_deadline_ticks());
+                    if !(*expired).is_active() {
+                        (*thread_ctx).set_state(ThreadState::ReadyActive);
+                    }
                     self.enqueue_active(expired);
                 }
             }

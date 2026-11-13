@@ -75,7 +75,7 @@ pub fn trace_thread(id: u32, name: &'static str, is_cfs: bool) -> ThreadCtx {
         exc_return: 0,
         id,
         name,
-        state: ThreadState::Ready,
+        state: ThreadState::ReadyActive,
         kind: if is_cfs {
             ThreadKind::Cfs
         } else {
@@ -136,7 +136,7 @@ pub fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
             exc_return: 0,
             id: 1,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Cfs,
         },
         wait_entity: WaitEntity::new(),
@@ -152,7 +152,7 @@ pub fn rt_thread(name: &'static str) -> RtThread {
             exc_return: 0,
             id: 2,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Rt,
         },
         wait_entity: WaitEntity::new(),

@@ -215,7 +215,7 @@ pub fn suspended_list_handles_middle_head_tail_and_reinsertion() {
         assert!((*WAIT_QUEUE.suspended.get()).head.is_null());
         assert!((*WAIT_QUEUE.suspended.get()).tail.is_null());
         // A detached wait entity can subsequently register a finite timeout.
-        (*last_handle.as_ptr()).set_state(ThreadState::Ready);
+        (*last_handle.as_ptr()).set_state(ThreadState::ReadyActive);
         (*wait_entity(last_handle)).wake_at = 5;
         insert_wait_thread(last_handle);
         assert_eq!(last.thread.state, ThreadState::Waiting);

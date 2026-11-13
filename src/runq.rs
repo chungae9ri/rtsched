@@ -202,7 +202,7 @@ pub(crate) unsafe fn update_from_leftmost(entity: *mut SchedEntity) {
 pub unsafe fn enqueue_thread(thread: ThreadHandle) {
     unsafe {
         let thread_ptr = thread.as_ptr();
-        (*thread_ptr).set_state(ThreadState::Ready);
+        (*thread_ptr).set_state(ThreadState::ReadyActive);
         let entity = cfs_sched_entity(thread);
         let tree = &mut *CFS_RUN_QUEUE.get();
         debug_assert!(
@@ -240,7 +240,7 @@ pub unsafe fn enqueue_runq_from_waitq(thread: ThreadHandle) {
 
         (*entity).reset_links();
         *CFS_RUN_QUEUE.priority_sum() = priority_sum;
-        (*thread_ptr).set_state(ThreadState::Ready);
+        (*thread_ptr).set_state(ThreadState::ReadyActive);
 
         // Update cfs_rq with priority_sum
         let mut updated = RBTree::new();
@@ -269,7 +269,7 @@ pub(crate) fn dequeue_runq_to_waitq(thread: ThreadHandle) -> Result<(), WaitQueu
 
         let entity = cfs_sched_entity(thread);
         // If the thread is Running, it is not in the runq.
-        if (*thread_ptr).state == ThreadState::Ready {
+        if (*thread_ptr).state == ThreadState::ReadyActive {
             (*CFS_RUN_QUEUE.get()).remove(entity);
         }
 

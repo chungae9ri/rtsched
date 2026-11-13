@@ -25,7 +25,7 @@ fn cfs_thread(name: &'static str, priority: u32) -> CfsThread {
             exc_return: 0,
             id: 1,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Cfs,
         },
         wait_entity: WaitEntity::new(),
@@ -41,7 +41,7 @@ fn rt_thread(name: &'static str) -> RtThread {
             exc_return: 0,
             id: 1,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Rt,
         },
         wait_entity: WaitEntity::new(),
@@ -188,7 +188,7 @@ pub fn mutex_lock_boosts_rt_owner_deadline_and_unlock_restores_it() {
     let owner_guard = mutex.lock().expect("owner should lock mutex");
 
     let waiter_handle = unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         make_running_rt(&mut waiter)
     };
 
@@ -212,7 +212,7 @@ pub fn mutex_lock_boosts_rt_owner_deadline_and_unlock_restores_it() {
 
     unsafe {
         assert_eq!(owner_timer.entity.expire_at(), 100);
-        assert_eq!(waiter.thread.state, ThreadState::Ready);
+        assert_eq!(waiter.thread.state, ThreadState::ReadyActive);
         assert!(ptr::eq(
             rt_ktimer_entity(waiter_handle),
             waiter_timer.entity_mut()
@@ -243,7 +243,7 @@ pub fn mutex_lock_boosts_rt_owner_to_earliest_scheduler_deadline_and_unlock_rest
     let owner_guard = mutex.lock().expect("owner should lock mutex");
 
     let waiter_handle = unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         make_running_rt(&mut waiter)
     };
 
@@ -266,7 +266,7 @@ pub fn mutex_lock_boosts_rt_owner_to_earliest_scheduler_deadline_and_unlock_rest
 
     unsafe {
         assert_eq!(owner_timer.entity.expire_at(), 100);
-        assert_eq!(waiter.thread.state, ThreadState::Ready);
+        assert_eq!(waiter.thread.state, ThreadState::ReadyActive);
 
         CURRENT_THREAD_CTX = ptr::null_mut();
         CURRENT_THREAD_IS_CFS = false;
@@ -294,7 +294,7 @@ pub fn mutex_lock_boosts_cfs_owner_to_earliest_scheduler_deadline_and_unlock_res
     let owner_guard = mutex.lock().expect("owner should lock mutex");
 
     unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         make_running_rt(&mut waiter);
     }
 
@@ -320,7 +320,7 @@ pub fn mutex_lock_boosts_cfs_owner_to_earliest_scheduler_deadline_and_unlock_res
         let cfs = ptr::addr_of!(CFS_KTIMER);
         let cfs_entity = ptr::addr_of!((*cfs).entity);
         assert_eq!((*cfs_entity).expire_at(), 25);
-        assert_eq!(waiter.thread.state, ThreadState::Ready);
+        assert_eq!(waiter.thread.state, ThreadState::ReadyActive);
 
         CURRENT_THREAD_CTX = ptr::null_mut();
         CURRENT_THREAD_IS_CFS = false;
@@ -361,7 +361,7 @@ pub fn binary_semaphore_take_blocks_current_cfs_thread_until_give() {
 
         assert_eq!(semaphore.give(), Ok(()));
 
-        assert_eq!(thread.thread.state, ThreadState::Ready);
+        assert_eq!(thread.thread.state, ThreadState::ReadyActive);
         assert!(!semaphore.is_available());
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
@@ -426,7 +426,7 @@ pub fn counting_semaphore_take_blocks_current_cfs_thread_until_give() {
 
         assert_eq!(semaphore.give(), Ok(()));
 
-        assert_eq!(thread.thread.state, ThreadState::Ready);
+        assert_eq!(thread.thread.state, ThreadState::ReadyActive);
         assert_eq!(semaphore.count(), 0);
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
@@ -480,7 +480,7 @@ pub fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
         assert!((*WAIT_QUEUE.get()).is_empty());
         assert_blocked_names(&["later", "earlier"]);
         assert_eq!(semaphore.give(), Ok(()));
-        assert_eq!((*earlier_ptr).state, ThreadState::Ready);
+        assert_eq!((*earlier_ptr).state, ThreadState::ReadyActive);
         assert_eq!((*later_ptr).state, ThreadState::Suspended);
         assert!((*earlier_entity).is_active());
         assert_eq!((*earlier_entity).expire_at(), 20);
@@ -491,9 +491,9 @@ pub fn suspended_rt_semaphore_waiters_wake_by_deadline_and_can_block_again() {
         assert_eq!(semaphore.take_with_context(true), Ok(()));
         assert_blocked_names(&["later", "earlier"]);
         assert_eq!(semaphore.give(), Ok(()));
-        assert_eq!((*earlier_ptr).state, ThreadState::Ready);
+        assert_eq!((*earlier_ptr).state, ThreadState::ReadyActive);
         assert_eq!(semaphore.give(), Ok(()));
-        assert_eq!((*later_ptr).state, ThreadState::Ready);
+        assert_eq!((*later_ptr).state, ThreadState::ReadyActive);
         assert!((*later_entity).is_active());
         assert_eq!(semaphore.count(), 0);
         assert_blocked_names(&[]);
@@ -552,7 +552,7 @@ pub fn mutex_try_lock_reports_would_block_for_other_owner() {
     let guard = mutex.try_lock().expect("owner should lock mutex");
 
     unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         other.thread.set_state(ThreadState::Running);
         CURRENT_THREAD_CTX = &mut other.thread;
         CURRENT_THREAD_IS_CFS = true;
@@ -561,7 +561,7 @@ pub fn mutex_try_lock_reports_would_block_for_other_owner() {
     assert!(matches!(mutex.try_lock(), Err(MutexError::WouldBlock)));
 
     unsafe {
-        other.thread.set_state(ThreadState::Ready);
+        other.thread.set_state(ThreadState::ReadyActive);
         owner.thread.set_state(ThreadState::Running);
         CURRENT_THREAD_CTX = &mut owner.thread;
         CURRENT_THREAD_IS_CFS = true;
@@ -590,7 +590,7 @@ pub fn mutex_lock_blocks_waiter_and_drop_transfers_ownership() {
     let owner_guard = mutex.lock().expect("owner should lock mutex");
 
     unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         let waiter_handle = make_running_cfs(&mut waiter);
         let waiter_guard = mutex
             .lock_with_context(true)
@@ -613,12 +613,12 @@ pub fn mutex_lock_blocks_waiter_and_drop_transfers_ownership() {
     unsafe {
         let waiter_handle = ThreadHandle::from_thread_ctx(&mut waiter.thread);
 
-        assert_eq!(waiter.thread.state, ThreadState::Ready);
+        assert_eq!(waiter.thread.state, ThreadState::ReadyActive);
         assert!(!(*WAIT_QUEUE.get()).contains(wait_entity(waiter_handle)));
         assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(waiter_handle)));
         assert_blocked_names(&[]);
 
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         waiter.thread.set_state(ThreadState::Running);
         CURRENT_THREAD_CTX = &mut waiter.thread;
         CURRENT_THREAD_IS_CFS = true;
@@ -665,7 +665,8 @@ pub fn semaphores_reject_invalid_blocking_context_without_changing_state() {
 
         for (state, can_block) in [
             (ThreadState::Running, false),
-            (ThreadState::Ready, true),
+            (ThreadState::ReadyActive, true),
+            (ThreadState::ReadyInactive, true),
             (ThreadState::Waiting, true),
             (ThreadState::Suspended, true),
         ] {
@@ -717,7 +718,7 @@ pub fn mutex_rejects_invalid_blocking_context_without_changing_owner_or_deadline
     let owner_guard = mutex.lock().unwrap();
 
     unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         let waiter_handle = make_running_rt(&mut waiter);
         let owner_token_before = load_word(&(*mutex.state.get()).owner);
         let next = next_ktimer();
@@ -728,7 +729,8 @@ pub fn mutex_rejects_invalid_blocking_context_without_changing_owner_or_deadline
 
         for (state, can_block) in [
             (ThreadState::Running, false),
-            (ThreadState::Ready, true),
+            (ThreadState::ReadyActive, true),
+            (ThreadState::ReadyInactive, true),
             (ThreadState::Waiting, true),
             (ThreadState::Suspended, true),
         ] {
@@ -784,7 +786,7 @@ pub fn sync_blocking_calls_reject_idle_thread() {
     let owner_guard = mutex.lock().unwrap();
 
     unsafe {
-        owner.thread.set_state(ThreadState::Ready);
+        owner.thread.set_state(ThreadState::ReadyActive);
         CURRENT_THREAD_CTX = &mut idle.thread;
         CURRENT_THREAD_IS_CFS = false;
     }

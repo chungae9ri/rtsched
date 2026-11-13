@@ -100,9 +100,9 @@ unsafe fn switch_to_cfs_thread(next_thread: ThreadHandle) {
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != next_thread_ptr
-            && !(*CURRENT_THREAD_CTX).state.is_blocked()
+            && (*CURRENT_THREAD_CTX).state == ThreadState::Running
         {
-            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+            (*CURRENT_THREAD_CTX).set_state(ThreadState::ReadyActive);
         }
 
         (*next_thread_ptr).set_state(ThreadState::Running);
@@ -122,9 +122,9 @@ unsafe fn switch_to_idle_thread() {
 
         if !CURRENT_THREAD_CTX.is_null()
             && CURRENT_THREAD_CTX != idle_thread_ptr
-            && !(*CURRENT_THREAD_CTX).state.is_blocked()
+            && (*CURRENT_THREAD_CTX).state == ThreadState::Running
         {
-            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+            (*CURRENT_THREAD_CTX).set_state(ThreadState::ReadyActive);
         }
 
         (*idle_thread_ptr).set_state(ThreadState::Running);
@@ -150,7 +150,7 @@ unsafe fn requeue_current_cfs_thread_before_idle() {
             !(*CFS_RUN_QUEUE.get()).contains(current_entity.cast_const()),
             "running CFS thread is already queued"
         );
-        (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+        (*CURRENT_THREAD_CTX).set_state(ThreadState::ReadyActive);
         (*CFS_RUN_QUEUE.get()).insert(current_entity);
     }
 }
@@ -182,7 +182,7 @@ extern "C" fn schedule() {
         //   otherwise the queued entity is reinserted and the current thread
         //   keeps running.
         // - If the next ktimer belongs to an RT thread, switch to that RT
-        //   thread. A non-waiting outgoing thread becomes Ready, and a non-idle
+        //   thread. A running outgoing thread becomes ReadyActive, and a non-idle
         //   outgoing CFS thread is requeued before the switch.
         if CURRENT_THREAD_IS_CFS
             && (*CURRENT_THREAD_CTX).state == ThreadState::Running
@@ -226,7 +226,7 @@ extern "C" fn schedule() {
                                 CURRENT_THREAD_CTX,
                                 next_thread_ptr,
                             );
-                            (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+                            (*CURRENT_THREAD_CTX).set_state(ThreadState::ReadyActive);
                             (*CFS_RUN_QUEUE.get()).insert(current_entity);
                             (*next_thread_ptr).set_state(ThreadState::Running);
                             CURRENT_THREAD_CTX = next_thread_ptr;
@@ -236,9 +236,6 @@ extern "C" fn schedule() {
                         }
                     }
                 } else {
-                    if !(*CURRENT_THREAD_CTX).state.is_blocked() {
-                        (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
-                    }
                     switch_to_cfs_thread(next_thread);
                 }
             } else {
@@ -252,8 +249,8 @@ extern "C" fn schedule() {
             }
             let next_thread_handle = ThreadHandle::from_thread_ctx(next_thread);
 
-            if !(*CURRENT_THREAD_CTX).state.is_blocked() {
-                (*CURRENT_THREAD_CTX).set_state(ThreadState::Ready);
+            if (*CURRENT_THREAD_CTX).state == ThreadState::Running {
+                (*CURRENT_THREAD_CTX).set_state(ThreadState::ReadyActive);
                 if CURRENT_THREAD_IS_CFS && !is_idle_thread(CURRENT_THREAD_CTX) {
                     let current = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
                     (*CFS_RUN_QUEUE.get()).insert(cfs_sched_entity(current));
