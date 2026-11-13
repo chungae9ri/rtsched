@@ -155,28 +155,40 @@ impl ThreadSpawnError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     /// The thread is eligible to run when selected by the scheduler.
+    /// RT threads have their timer in `KTimerQueue::active_tree`; CFS threads
+    /// are queued in the CFS run queue, and idle is the scheduler fallback.
     ///
     /// Normal transitions:
-    /// - `Ready -> Running` when selected by the scheduler.
-    /// - `Ready -> Waiting/Suspended` when blocked before it runs.
-    Ready,
+    /// - `ReadyActive -> Running` when selected by the scheduler.
+    /// - `ReadyActive -> Waiting/Suspended` when blocked before it runs.
+    ReadyActive,
+    /// The RT thread completed its job and awaits its next periodic release.
+    /// Its timer remains in `KTimerQueue::inactive_tree` until that release.
+    ///
+    /// Normal transitions:
+    /// - `ReadyInactive -> ReadyActive` when the next job is released.
+    /// - `ReadyInactive -> Waiting/Suspended` when entering a wait.
+    ///
+    /// The scheduler cannot select this thread until it becomes `ReadyActive`.
+    ReadyInactive,
     /// The thread is currently executing on the CPU.
     ///
     /// Normal transitions:
-    /// - `Running -> Ready` when preempted or voluntarily yielding.
+    /// - `Running -> ReadyActive` when preempted.
+    /// - `Running -> ReadyInactive` when an RT job completes with `yieldyi`.
     /// - `Running -> Waiting/Suspended` when sleeping or waiting for an event.
     Running,
     /// The thread has a finite timeout, optionally waiting for an event.
     ///
     /// Normal transition:
-    /// - `Waiting -> Ready` when its wait condition expires or is satisfied.
+    /// - `Waiting -> ReadyActive` when its wait condition expires or is satisfied.
     ///
     /// `Waiting -> Running` is deliberately not a scheduler transition; a
-    /// thread must become `Ready` before it can be selected to run.
+    /// thread must become `ReadyActive` before it can be selected to run.
     Waiting,
     /// The thread is waiting indefinitely for an external event or resource.
     ///
-    /// Suspended threads have no timeout and become `Ready` when woken.
+    /// Suspended threads have no timeout and become `ReadyActive` when woken.
     Suspended,
 }
 
@@ -188,10 +200,14 @@ impl ThreadState {
 
     pub const fn can_transition_to(self, next: Self) -> bool {
         match (self, next) {
-            (Self::Ready | Self::Running, _) => true,
-            (Self::Waiting, Self::Ready | Self::Waiting) => true,
-            (Self::Suspended, Self::Ready | Self::Suspended) => true,
-            (Self::Waiting | Self::Suspended, _) => false,
+            (Self::ReadyActive | Self::Running, _) => true,
+            (
+                Self::ReadyInactive,
+                Self::ReadyActive | Self::ReadyInactive | Self::Waiting | Self::Suspended,
+            ) => true,
+            (Self::Waiting, Self::ReadyActive | Self::Waiting) => true,
+            (Self::Suspended, Self::ReadyActive | Self::Suspended) => true,
+            (Self::ReadyInactive | Self::Waiting | Self::Suspended, _) => false,
         }
     }
 }
@@ -642,7 +658,7 @@ pub(crate) unsafe fn spawn_idle_thread<const N: usize>(
                     exc_return: initial_context.exc_return,
                     id,
                     name: start.name,
-                    state: ThreadState::Ready,
+                    state: ThreadState::ReadyActive,
                     kind: ThreadKind::Idle,
                 },
             },
@@ -803,7 +819,7 @@ pub unsafe fn forkyi<T: ThreadControlBlock>(
             exc_return: initial_context.exc_return,
             id,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: T::KIND,
         };
         ThreadHandle::from_thread_ctx(T::init(thread, common, init_args))

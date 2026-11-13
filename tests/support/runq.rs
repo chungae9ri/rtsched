@@ -30,7 +30,7 @@ fn cfs_thread(name: &'static str, priority: u32, vruntime: u64) -> CfsThread {
             exc_return: 0,
             id: 0,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Cfs,
         },
         wait_entity: WaitEntity::new(),

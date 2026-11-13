@@ -414,7 +414,8 @@ fn ktimer_kind_name(entity: *const KTimerEntity) -> &'static str {
 
 fn thread_state_name(state: ThreadState) -> &'static str {
     match state {
-        ThreadState::Ready => "Ready",
+        ThreadState::ReadyActive => "ReadyActive",
+        ThreadState::ReadyInactive => "ReadyInactive",
         ThreadState::Running => "Running",
         ThreadState::Waiting => "Waiting",
         ThreadState::Suspended => "Suspended",

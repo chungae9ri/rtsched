@@ -1,6 +1,11 @@
 use rtsched::test_support::sched;
 
 #[test]
+fn switching_to_cfs_rt_or_idle_preserves_inactive_outgoing_rt_thread() {
+    sched::switching_to_cfs_rt_or_idle_preserves_inactive_outgoing_rt_thread();
+}
+
+#[test]
 fn scheduler_started_latch_is_marked_explicitly() {
     sched::scheduler_started_latch_is_marked_explicitly();
 }

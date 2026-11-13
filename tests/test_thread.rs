@@ -20,20 +20,30 @@ extern "C" fn test_entry(_arg: *mut c_void) -> ! {
 
 #[test]
 fn thread_state_transition_matrix_documents_lifecycle() {
-    assert!(ThreadState::Ready.can_transition_to(ThreadState::Running));
-    assert!(ThreadState::Ready.can_transition_to(ThreadState::Waiting));
-    assert!(ThreadState::Running.can_transition_to(ThreadState::Ready));
+    assert!(ThreadState::ReadyActive.can_transition_to(ThreadState::Running));
+    assert!(ThreadState::ReadyActive.can_transition_to(ThreadState::Waiting));
+    assert!(ThreadState::Running.can_transition_to(ThreadState::ReadyActive));
     assert!(ThreadState::Running.can_transition_to(ThreadState::Waiting));
-    assert!(ThreadState::Waiting.can_transition_to(ThreadState::Ready));
-    assert!(ThreadState::Ready.can_transition_to(ThreadState::Suspended));
+    assert!(ThreadState::Waiting.can_transition_to(ThreadState::ReadyActive));
+    assert!(ThreadState::ReadyActive.can_transition_to(ThreadState::Suspended));
     assert!(ThreadState::Running.can_transition_to(ThreadState::Suspended));
-    assert!(ThreadState::Suspended.can_transition_to(ThreadState::Ready));
+    assert!(ThreadState::Suspended.can_transition_to(ThreadState::ReadyActive));
+    assert!(ThreadState::Running.can_transition_to(ThreadState::ReadyInactive));
+    assert!(ThreadState::ReadyActive.can_transition_to(ThreadState::ReadyInactive));
+    assert!(ThreadState::ReadyInactive.can_transition_to(ThreadState::ReadyActive));
+    assert!(ThreadState::ReadyInactive.can_transition_to(ThreadState::ReadyInactive));
+    assert!(ThreadState::ReadyInactive.can_transition_to(ThreadState::Waiting));
+    assert!(ThreadState::ReadyInactive.can_transition_to(ThreadState::Suspended));
 
+    assert!(!ThreadState::ReadyInactive.can_transition_to(ThreadState::Running));
+    assert!(!ThreadState::Waiting.can_transition_to(ThreadState::ReadyInactive));
+    assert!(!ThreadState::Suspended.can_transition_to(ThreadState::ReadyInactive));
     assert!(!ThreadState::Waiting.can_transition_to(ThreadState::Running));
     assert!(!ThreadState::Suspended.can_transition_to(ThreadState::Running));
     assert!(ThreadState::Waiting.is_blocked());
     assert!(ThreadState::Suspended.is_blocked());
-    assert!(!ThreadState::Ready.is_blocked());
+    assert!(!ThreadState::ReadyActive.is_blocked());
+    assert!(!ThreadState::ReadyInactive.is_blocked());
     assert!(!ThreadState::Running.is_blocked());
 }
 
@@ -41,7 +51,7 @@ fn thread_state_transition_matrix_documents_lifecycle() {
 fn thread_context_helpers_follow_ready_running_waiting_ready_cycle() {
     let mut cfs = test_support::cfs_thread("cfs", 1);
 
-    assert_eq!(cfs.thread_ctx().state, ThreadState::Ready);
+    assert_eq!(cfs.thread_ctx().state, ThreadState::ReadyActive);
 
     test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::Running);
     assert_eq!(cfs.thread_ctx().state, ThreadState::Running);
@@ -49,8 +59,8 @@ fn thread_context_helpers_follow_ready_running_waiting_ready_cycle() {
     test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::Waiting);
     assert_eq!(cfs.thread_ctx().state, ThreadState::Waiting);
 
-    test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::Ready);
-    assert_eq!(cfs.thread_ctx().state, ThreadState::Ready);
+    test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::ReadyActive);
+    assert_eq!(cfs.thread_ctx().state, ThreadState::ReadyActive);
 }
 
 #[test]
@@ -61,6 +71,16 @@ fn waiting_thread_cannot_transition_directly_to_running() {
 
     test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::Waiting);
     test_support::set_thread_state(cfs.thread_ctx_mut(), ThreadState::Running);
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "invalid thread state transition")]
+fn inactive_thread_cannot_transition_directly_to_running() {
+    let mut rt = test_support::rt_thread("rt");
+
+    test_support::set_thread_state(rt.thread_ctx_mut(), ThreadState::ReadyInactive);
+    test_support::set_thread_state(rt.thread_ctx_mut(), ThreadState::Running);
 }
 
 #[test]
@@ -81,7 +101,7 @@ fn cfs_thread_builder_initializes_typed_storage_and_stack() {
         assert!(ptr::eq(thread, ptr::addr_of!(*cfs.thread_ctx()).cast_mut()));
         assert_eq!(handle.id().as_u32(), (*thread).id);
         assert_eq!(handle.name(), "cfs");
-        assert_eq!(handle.state(), ThreadState::Ready);
+        assert_eq!(handle.state(), ThreadState::ReadyActive);
         assert!(handle.is_cfs());
         assert!(!handle.is_rt());
         assert!(!handle.is_idle());
@@ -117,7 +137,7 @@ fn spawn_idle_thread_initializes_storage_without_cfs_run_queue_priority() {
             ptr::addr_of!(*idle.thread_ctx()).cast_mut()
         ));
         assert_eq!(handle.name(), "idle");
-        assert_eq!(handle.state(), ThreadState::Ready);
+        assert_eq!(handle.state(), ThreadState::ReadyActive);
         assert!(handle.is_idle());
         assert!(!handle.is_cfs());
         assert!(!handle.is_rt());
@@ -148,7 +168,7 @@ fn rt_thread_builder_initializes_typed_storage_stack_and_timer() {
         assert!(ptr::eq(thread, ptr::addr_of!(*rt.thread_ctx()).cast_mut()));
         assert_eq!(handle.id().as_u32(), (*thread).id);
         assert_eq!(handle.name(), "rt");
-        assert_eq!(handle.state(), ThreadState::Ready);
+        assert_eq!(handle.state(), ThreadState::ReadyActive);
         assert!(!handle.is_cfs());
         assert!(handle.is_rt());
         assert!(!handle.is_idle());
@@ -384,7 +404,7 @@ fn current_thread_helpers_report_current_cfs_thread() {
     let handle = current_thread().expect("current CFS thread should be set");
     assert_eq!(handle.id(), cfs.thread_ctx().id());
     assert_eq!(handle.name(), "cfs");
-    assert_eq!(handle.state(), ThreadState::Ready);
+    assert_eq!(handle.state(), ThreadState::ReadyActive);
     assert!(handle.is_cfs());
     assert_eq!(current_thread_id(), Some(cfs.thread_ctx().id()));
 

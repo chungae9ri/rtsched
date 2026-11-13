@@ -53,8 +53,13 @@ reprograms the timer does not add those elapsed ticks again. Message-queue
 timeouts use this clock, including partial timer intervals, and keep one
 absolute deadline across retries.
 
-When `RtThread` completes its job, it should call `yieldyi` to make itself inactive and to reset its
-`runtime`. The inactive RT timer is parked until the next `period_ticks` release.
+When `RtThread` completes its job, it should call `yieldyi` to enter
+`ThreadState::ReadyInactive` and reset its `runtime`. Its timer moves from
+`active_tree` to `inactive_tree` until the next `period_ticks` release. Dispatch
+then moves it back to `active_tree` and sets `ThreadState::ReadyActive` before
+the scheduler can select it. A preempted RT thread stays in `active_tree` and
+becomes `ReadyActive`; blocking detaches its timer and enters `Waiting` or
+`Suspended` until a wake restores `ReadyActive` in `active_tree`.
 The scheduler accounts the final elapsed interval and calculates that release
 using the completed job's runtime before clearing the counter. Application code
 does not need to reset runtime at job entry. Sleeping or blocking within the

@@ -152,7 +152,7 @@ pub fn cfs_receiver_suspends_and_resumes_with_message() {
             assert!(!(*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(handle)));
         }
         assert_eq!(queue.try_send(42), Ok(()));
-        assert_eq!(receiver.thread.state, ThreadState::Ready);
+        assert_eq!(receiver.thread.state, ThreadState::ReadyActive);
         unsafe { resume_cfs(&mut receiver) };
     });
     assert_eq!(value, Ok(42));
@@ -173,7 +173,7 @@ pub fn cfs_sender_suspends_until_space_is_available() {
         suspensions += 1;
         assert_eq!(sender.thread.state, ThreadState::Suspended);
         assert_eq!(queue.try_receive(), Ok(1));
-        assert_eq!(sender.thread.state, ThreadState::Ready);
+        assert_eq!(sender.thread.state, ThreadState::ReadyActive);
         unsafe { resume_cfs(&mut sender) };
     });
     assert_eq!(result, Ok(()));
@@ -199,7 +199,7 @@ pub fn rt_receiver_retries_after_another_consumer_takes_the_message() {
         assert_eq!(receiver.thread.state, ThreadState::Suspended);
         with_ktimer_queue(|timers| assert!(!timers.contains(timer.entity_mut())));
         queue.try_send(suspensions).unwrap();
-        assert_eq!(receiver.thread.state, ThreadState::Ready);
+        assert_eq!(receiver.thread.state, ThreadState::ReadyActive);
         with_ktimer_queue(|timers| assert!(timers.contains(timer.entity_mut())));
         if suspensions == 1 {
             assert_eq!(queue.try_receive(), Ok(1));
@@ -230,7 +230,7 @@ pub fn rt_sender_retries_after_another_producer_fills_the_slot() {
         assert!(suspensions <= 2);
         assert_eq!(sender.thread.state, ThreadState::Suspended);
         assert_eq!(queue.try_receive(), Ok(suspensions));
-        assert_eq!(sender.thread.state, ThreadState::Ready);
+        assert_eq!(sender.thread.state, ThreadState::ReadyActive);
         if suspensions == 1 {
             queue.try_send(2).unwrap();
         }
@@ -286,11 +286,11 @@ pub fn queue_waiters_wake_by_deadline_and_address_in_both_directions() {
             } else {
                 queue.try_send(step as u32).unwrap();
             }
-            assert_eq!(threads[index].thread.state, ThreadState::Ready);
+            assert_eq!(threads[index].thread.state, ThreadState::ReadyActive);
             assert_eq!(
                 threads
                     .iter()
-                    .filter(|thread| thread.thread.state == ThreadState::Ready)
+                    .filter(|thread| thread.thread.state == ThreadState::ReadyActive)
                     .count(),
                 step + 1
             );
@@ -315,7 +315,7 @@ pub fn queues_do_not_wake_each_others_waiters() {
     second.try_send(1).unwrap();
     assert_eq!(receiver.thread.state, ThreadState::Suspended);
     first.try_send(2).unwrap();
-    assert_eq!(receiver.thread.state, ThreadState::Ready);
+    assert_eq!(receiver.thread.state, ThreadState::ReadyActive);
     assert_eq!(first.try_receive(), Ok(2));
     assert_eq!(second.try_receive(), Ok(1));
 }
@@ -357,11 +357,11 @@ pub fn mixed_cfs_and_rt_waiters_share_deadline_ordering() {
     critical_section(|| queue.block(SyncType::MessageQueueReceive, true)).unwrap();
 
     queue.try_send(1).unwrap();
-    assert_eq!(realtime.thread.state, ThreadState::Ready);
+    assert_eq!(realtime.thread.state, ThreadState::ReadyActive);
     assert_eq!(background.thread.state, ThreadState::Suspended);
     with_ktimer_queue(|timers| assert!(timers.contains(timer.entity_mut())));
     queue.try_send(2).unwrap();
-    assert_eq!(background.thread.state, ThreadState::Ready);
+    assert_eq!(background.thread.state, ThreadState::ReadyActive);
     unsafe { assert!((*CFS_RUN_QUEUE.get()).contains(cfs_sched_entity(cfs_handle))) };
     assert_eq!(queue.try_receive(), Ok(1));
     assert_eq!(queue.try_receive(), Ok(2));
@@ -388,7 +388,7 @@ pub fn timed_waits_expire_and_leave_both_wait_indexes() {
                 advance_message_time(9, true);
                 assert_eq!(handle.state(), ThreadState::Waiting);
                 advance_message_time(1, true);
-                assert_eq!(handle.state(), ThreadState::Ready);
+                assert_eq!(handle.state(), ThreadState::ReadyActive);
                 assert_message_wait_detached(&queue, handle);
                 // A resource made available after expiry must not turn timeout
                 // into success or cause the failed operation to consume it.
@@ -434,7 +434,7 @@ pub fn timed_waits_succeed_before_deadline() {
                 } else {
                     queue.try_send(9).unwrap();
                 }
-                assert_eq!(handle.state(), ThreadState::Ready);
+                assert_eq!(handle.state(), ThreadState::ReadyActive);
                 assert_message_wait_detached(&queue, handle);
                 assert!(!queue.cancel_wait(handle));
                 unsafe { resume_message_thread(is_rt, &mut cfs, &mut rt) };
@@ -526,7 +526,7 @@ pub fn cancellation_cleans_up_cfs_and_rt_operations() {
                     );
                     assert!(!other.cancel_wait(handle));
                     assert!(queue.cancel_wait(handle));
-                    assert_eq!(handle.state(), ThreadState::Ready);
+                    assert_eq!(handle.state(), ThreadState::ReadyActive);
                     assert!(!queue.cancel_wait(handle));
                     assert_message_wait_detached(&queue, handle);
                     // Cancellation remains the result even if its old deadline
@@ -600,8 +600,8 @@ pub fn expired_waiters_do_not_steal_peer_wakeups() {
         } else {
             queue.try_send(9).unwrap();
         }
-        assert_eq!(handles[0].state(), ThreadState::Ready);
-        assert_eq!(handles[1].state(), ThreadState::Ready);
+        assert_eq!(handles[0].state(), ThreadState::ReadyActive);
+        assert_eq!(handles[1].state(), ThreadState::ReadyActive);
         assert_eq!(handles[2].state(), ThreadState::Suspended);
         unsafe {
             assert_eq!(
@@ -638,7 +638,7 @@ pub fn timeout_wins_cancellation_at_deadline() {
             let result = run_message_wait(&queue, sending, Some(5), || {
                 advance_message_time(5, false);
                 assert!(!queue.cancel_wait(handle));
-                assert_eq!(handle.state(), ThreadState::Ready);
+                assert_eq!(handle.state(), ThreadState::ReadyActive);
                 assert_message_wait_detached(&queue, handle);
                 advance_message_time(1, true);
                 unsafe { resume_message_thread(is_rt, &mut cfs, &mut rt) };
@@ -741,7 +741,7 @@ pub fn notified_wait_can_timeout_before_dispatch() {
                 } else {
                     queue.try_send(9).unwrap();
                 }
-                assert_eq!(handle.state(), ThreadState::Ready);
+                assert_eq!(handle.state(), ThreadState::ReadyActive);
                 assert!(!queue.cancel_wait(handle));
                 advance_message_time(6, true);
                 unsafe { resume_message_thread(is_rt, &mut cfs, &mut rt) };
@@ -789,7 +789,7 @@ pub fn staggered_timeouts_and_cancellation_preserve_remaining_waiters() {
     assert!(queue.cancel_wait(handles[1]));
     unsafe { assert_eq!((*WAIT_QUEUE.get()).len(), 2) };
     advance_message_time(5, true);
-    assert_eq!(handles[0].state(), ThreadState::Ready);
+    assert_eq!(handles[0].state(), ThreadState::ReadyActive);
     assert_eq!(handles[2].state(), ThreadState::Waiting);
     unsafe {
         assert_eq!(
@@ -805,7 +805,7 @@ pub fn staggered_timeouts_and_cancellation_preserve_remaining_waiters() {
     advance_message_time(9, true);
     assert_eq!(handles[2].state(), ThreadState::Waiting);
     advance_message_time(1, true);
-    assert_eq!(handles[2].state(), ThreadState::Ready);
+    assert_eq!(handles[2].state(), ThreadState::ReadyActive);
     unsafe {
         assert_eq!(
             take_message_wait_result(handles[2]),
@@ -849,7 +849,7 @@ pub fn reentrant_publish_during_block_registration_is_not_lost() {
     receiver.runtime = 11;
     crate::print::set_print_fn(publish_from_print);
     let value = QUEUE.receive_with_wait(true, || {
-        assert_eq!(receiver.thread.state, ThreadState::Ready);
+        assert_eq!(receiver.thread.state, ThreadState::ReadyActive);
         unsafe { resume_rt(&mut receiver) };
     });
     assert_eq!(value, Ok(9));

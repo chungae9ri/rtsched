@@ -234,10 +234,10 @@ switch to take effect before the operation retries.
 Each successful send notifies at most one unexpired receiver; each successful
 receive notifies at most one unexpired sender. Expired waiters encountered
 before that peer are removed and completed as `TimedOut` too. Existing wake
-helpers remove the global wait entry, set `Ready`, and restore CFS run-queue or
+helpers remove the global wait entry, set `ReadyActive`, and restore CFS run-queue or
 RT timer membership. Timer expiry removes the per-queue waiter before doing
 the same runnable-state restoration. Cancellation removes both memberships.
-The scheduler subsequently transitions `Ready -> Running`. Wakeups use the
+The scheduler subsequently transitions `ReadyActive -> Running`. Wakeups use the
 existing trace counters and callbacks.
 
 Waiters are ordered by their scheduler deadline captured when they block:

@@ -27,7 +27,7 @@ fn rt_thread(name: &'static str) -> RtThread {
             exc_return: 0,
             id: 1,
             name,
-            state: ThreadState::Ready,
+            state: ThreadState::ReadyActive,
             kind: ThreadKind::Rt,
         },
         wait_entity: WaitEntity::new(),
@@ -523,11 +523,17 @@ pub fn yielded_rt_timer_programs_release_before_next_active_deadline() {
         assert_eq!(next, later_timer.entity_mut());
         assert_eq!(queue.first_active(), later_timer.entity_mut());
         assert_eq!(queue.first(), current_timer.entity_mut());
+        assert_eq!(current.thread.state, ThreadState::ReadyInactive);
+        assert!(queue.inactive_tree.contains(current_timer.entity_mut()));
+        assert!(!queue.active_tree.contains(current_timer.entity_mut()));
         assert_eq!(queue.next_reload(), Some(89));
 
         queue.advance_time(90);
         assert_eq!(queue.dispatch_expired(90), current_timer.entity_mut());
         assert!(current_timer.entity.is_active());
+        assert_eq!(current.thread.state, ThreadState::ReadyActive);
+        assert!(queue.active_tree.contains(current_timer.entity_mut()));
+        assert!(!queue.inactive_tree.contains(current_timer.entity_mut()));
         assert_eq!(current_timer.entity.expire_at(), 130);
         assert_eq!(queue.first_active(), current_timer.entity_mut());
         assert_eq!(queue.next_reload(), Some(29));
@@ -558,6 +564,8 @@ pub fn deadline_update_keeps_inactive_timer_out_of_runnable_selection() {
 
         let queue = &*KTIMER_QUEUE.get();
         assert!(!current_timer.entity.is_active());
+        assert_eq!(current.thread.state, ThreadState::ReadyInactive);
+        assert!(queue.inactive_tree.contains(current_timer.entity_mut()));
         assert_eq!(current_timer.entity.expire_at(), 20);
         assert_eq!(queue.first(), current_timer.entity_mut());
         assert_eq!(queue.first_active(), later_timer.entity_mut());
@@ -582,6 +590,7 @@ pub fn dispatch_processes_simultaneous_active_expiry_and_inactive_release() {
         expiry_timer.init_rt_ktimer(&mut expired.thread);
         release_timer.entity.set_expire_at(25);
         expiry_timer.entity.set_expire_at(25);
+        released.thread.set_state(ThreadState::ReadyInactive);
 
         let queue = &mut *KTIMER_QUEUE.get();
         queue.enqueue_inactive(release_timer.entity_mut());
@@ -593,6 +602,7 @@ pub fn dispatch_processes_simultaneous_active_expiry_and_inactive_release() {
         assert!(!(*cfs).is_active());
         assert_eq!((*cfs).expire_at(), 100);
         assert!(release_timer.entity.is_active());
+        assert_eq!(released.thread.state, ThreadState::ReadyActive);
         assert_eq!(release_timer.entity.expire_at(), 35);
         assert!(expiry_timer.entity.is_active());
         assert_eq!(expiry_timer.entity.expire_at(), 125);
@@ -709,6 +719,7 @@ pub fn rt_yield_marks_timer_inactive_and_preserves_remaining_period() {
     }
 
     assert_eq!(rt.runtime, 20);
+    assert_eq!(rt.thread.state, ThreadState::ReadyInactive);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 100);
     unsafe {
@@ -747,6 +758,7 @@ pub fn yieldyi_resets_rt_runtime_after_scheduling_next_release() {
     }
 
     assert_eq!(rt.runtime, 0);
+    assert_eq!(rt.thread.state, ThreadState::ReadyInactive);
     assert!(!ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 45);
     unsafe {
@@ -868,7 +880,9 @@ pub fn wake_wait_thread_charges_wait_elapsed_to_rt_deadline() {
         wake_wait_thread(&mut queue, 30);
     }
 
-    assert!(rt.thread.state == ThreadState::Ready);
+    assert!(rt.thread.state == ThreadState::ReadyActive);
+    assert!(queue.active_tree.contains(ktimer.entity_mut()));
+    assert!(!queue.inactive_tree.contains(ktimer.entity_mut()));
     assert_eq!(rt.runtime, 50);
     assert!(ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 100);
@@ -957,14 +971,34 @@ pub fn rt_waiting_thread_is_moved_from_ktimer_queue_to_wait_queue() {
 
         assert!(rt.thread.state == ThreadState::Waiting);
         assert!(!ktimer.entity.is_active());
+        assert!(
+            !(*KTIMER_QUEUE.get())
+                .active_tree
+                .contains(ktimer.entity_mut())
+        );
+        assert!(
+            !(*KTIMER_QUEUE.get())
+                .inactive_tree
+                .contains(ktimer.entity_mut())
+        );
         assert!(!(*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()));
         assert!((*WAIT_QUEUE.get()).contains(wait_entity(handle)));
         assert!(ptr::eq(rt_ktimer_entity(handle), ktimer.entity_mut()));
 
         assert!(enqueue_ktimerq_from_waitq(handle).is_ok());
 
-        assert!(rt.thread.state == ThreadState::Ready);
+        assert!(rt.thread.state == ThreadState::ReadyActive);
         assert!(ktimer.entity.is_active());
+        assert!(
+            (*KTIMER_QUEUE.get())
+                .active_tree
+                .contains(ktimer.entity_mut())
+        );
+        assert!(
+            !(*KTIMER_QUEUE.get())
+                .inactive_tree
+                .contains(ktimer.entity_mut())
+        );
         assert!(
             (*KTIMER_QUEUE.get()).contains(ktimer.entity_mut()),
             "deadlines after enqueue from waitq: {:?}",
@@ -1132,6 +1166,7 @@ pub fn dispatch_expired_active_rt_timer_without_runtime_over_deadline_is_not_mis
 
     unsafe {
         ktimer.init_rt_ktimer(&mut rt.thread);
+        rt.thread.set_state(ThreadState::Running);
         rt.runtime = 50;
         ktimer.entity.set_expire_at(10);
         queue.enqueue_active(ktimer.entity_mut());
@@ -1143,6 +1178,7 @@ pub fn dispatch_expired_active_rt_timer_without_runtime_over_deadline_is_not_mis
     assert!(ptr::eq(next, ktimer.entity_mut()));
     assert_eq!(ktimer.miss_cnt, 0);
     assert_eq!(rt.runtime, 0);
+    assert_eq!(rt.thread.state, ThreadState::Running);
     assert!(ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 60);
 }
@@ -1156,17 +1192,24 @@ pub fn dispatch_expired_inactive_rt_timer_reactivates_without_miss() {
 
     unsafe {
         ktimer.init_rt_ktimer(&mut rt.thread);
+        rt.thread.set_state(ThreadState::ReadyInactive);
         rt.runtime = 30;
         ktimer.entity.set_expire_at(10);
         queue.enqueue_inactive(ktimer.entity_mut());
     }
 
     queue.advance_time(10);
+    assert_eq!(rt.thread.state, ThreadState::ReadyInactive);
+    assert!(queue.inactive_tree.contains(ktimer.entity_mut()));
+    assert!(!queue.active_tree.contains(ktimer.entity_mut()));
     let next = unsafe { queue.dispatch_expired(10) };
 
     assert!(ptr::eq(next, ktimer.entity_mut()));
     assert_eq!(ktimer.miss_cnt, 0);
     assert_eq!(rt.runtime, 0);
+    assert_eq!(rt.thread.state, ThreadState::ReadyActive);
+    assert!(queue.active_tree.contains(ktimer.entity_mut()));
+    assert!(!queue.inactive_tree.contains(ktimer.entity_mut()));
     assert!(ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 60);
 }
@@ -1180,6 +1223,7 @@ pub fn dispatch_expired_inactive_rt_timer_uses_relative_deadline() {
 
     unsafe {
         ktimer.init_rt_ktimer(&mut rt.thread);
+        rt.thread.set_state(ThreadState::ReadyInactive);
         rt.runtime = 30;
         ktimer.entity.set_expire_at(100);
         queue.enqueue_inactive(ktimer.entity_mut());
@@ -1191,6 +1235,7 @@ pub fn dispatch_expired_inactive_rt_timer_uses_relative_deadline() {
     assert!(ptr::eq(next, ktimer.entity_mut()));
     assert_eq!(ktimer.miss_cnt, 0);
     assert_eq!(rt.runtime, 0);
+    assert_eq!(rt.thread.state, ThreadState::ReadyActive);
     assert!(ktimer.entity.is_active());
     assert_eq!(ktimer.entity.expire_at(), 140);
 }
