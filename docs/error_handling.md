@@ -19,6 +19,14 @@
   safe wrappers or scheduler ownership rules, such as intrusive-tree duplicate insertion
   checks and raw pointer downcasts.
 
+Detected RT deadline misses are a runtime panic path. When an active RT timer
+expires and its thread's accounted runtime exceeds the relative deadline, the
+scheduler emits a deadline-miss trace event, increments `RtKTimer::miss_cnt`,
+prints timer and thread diagnostics through the registered print callback, and
+panics. The board's panic handler determines the final behavior. This replaces
+v0.1.0's logging-and-continuing behavior. Budget overruns are reported and
+counted without panicking. See [the timer guide](ktimer.md).
+
 `BinarySemaphore::take`, `CountingSemaphore::take`, and `Mutex::lock` reject a
 required wait with `InvalidContext` unless the selected thread is `Running`,
 non-idle, and context switching is available. On Cortex-M, the caller must be in
