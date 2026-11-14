@@ -478,3 +478,121 @@ fn current_rt_thread_runtime_ignores_missing_current_thread() {
 
     assert_eq!(current_rt_thread_runtime(), None);
 }
+
+fn assert_thread_operation_panics(
+    operation: impl FnOnce() + std::panic::UnwindSafe,
+    expected: &str,
+) {
+    let panic =
+        std::panic::catch_unwind(operation).expect_err("invalid thread operation must panic");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+    assert_eq!(message, Some(expected));
+}
+
+#[test]
+fn thread_operations_reject_missing_current_thread() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    unsafe { test_support::clear_current_thread() };
+    let counters = rtsched::trace_counters();
+
+    assert_thread_operation_panics(
+        rtsched::yieldyi,
+        "thread operation requires a current scheduler thread",
+    );
+    assert_thread_operation_panics(
+        || rtsched::msleepyi(1),
+        "thread operation requires a current scheduler thread",
+    );
+
+    assert_eq!(current_thread(), None);
+    assert_eq!(rtsched::trace_counters(), counters);
+}
+
+#[test]
+fn thread_operations_reject_nonrunning_threads_without_changing_state() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    for state in [
+        ThreadState::ReadyActive,
+        ThreadState::ReadyInactive,
+        ThreadState::Waiting,
+        ThreadState::Suspended,
+    ] {
+        for kind in [ThreadKind::Cfs, ThreadKind::Rt] {
+            let mut thread = test_support::trace_thread(7, "not-running", kind.is_cfs());
+            thread.state = state;
+            unsafe { test_support::set_current_thread(&mut thread, kind.is_cfs()) };
+
+            assert_thread_operation_panics(
+                || test_support::yield_thread_for_test(true),
+                "thread operation requires a running scheduler thread",
+            );
+            assert_thread_operation_panics(
+                || test_support::sleep_thread_for_test(1, true),
+                "thread operation requires a running scheduler thread",
+            );
+
+            assert_eq!(thread.state, state);
+            unsafe { test_support::clear_current_thread() };
+        }
+    }
+}
+
+#[test]
+fn thread_operations_reject_unavailable_context_switch_without_changing_state() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut cfs = test_support::cfs_thread("cfs", 1);
+    let mut rt = test_support::rt_thread("rt");
+    let counters = rtsched::trace_counters();
+
+    for thread in [cfs.thread_ctx_mut(), rt.thread_ctx_mut()] {
+        thread.state = ThreadState::Running;
+        let is_cfs = thread.is_cfs();
+        unsafe { test_support::set_current_thread(thread, is_cfs) };
+
+        // The native platform has no hardware context switch. These public
+        // calls exercise the same rejection used for an ISR or masked PendSV.
+        assert_thread_operation_panics(
+            rtsched::yieldyi,
+            "thread operation requires thread mode with context switching enabled",
+        );
+        assert_thread_operation_panics(
+            || rtsched::msleepyi(1),
+            "thread operation requires thread mode with context switching enabled",
+        );
+
+        assert_eq!(thread.state, ThreadState::Running);
+        unsafe { test_support::clear_current_thread() };
+    }
+
+    assert_eq!(cfs.wait_info(), (0, None));
+    assert_eq!(rt.wait_info(), (0, None));
+    assert_eq!(rt.runtime(), 0);
+    assert_eq!(rtsched::trace_counters(), counters);
+}
+
+#[test]
+fn idle_thread_operations_remain_noops() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut storage = MaybeUninit::<IdleThread>::uninit();
+    let mut stack = AlignedStack([0; 64]);
+
+    unsafe {
+        let handle = test_support::spawn_idle_thread_for_test(
+            ThreadStart::new("idle", test_entry),
+            &mut storage,
+            &mut stack,
+        );
+        let thread = test_support::thread_ptr(handle);
+        (*thread).state = ThreadState::Running;
+        test_support::set_current_thread(thread, false);
+
+        rtsched::yieldyi();
+        rtsched::msleepyi(1);
+
+        assert_eq!(handle.state(), ThreadState::Running);
+        test_support::clear_current_thread();
+    }
+}

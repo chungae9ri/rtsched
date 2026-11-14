@@ -22,9 +22,21 @@ The `host` Cargo feature explicitly selects `HostPlatform` for native tests,
 benchmarks, and documentation builds on any host CPU and OS. Hardware operations
 such as `spawn_main_thread` remain unavailable in this test backend.
 
-Without `host`, ARM targets select `CortexMPlatform`, which is backed by SysTick,
-PendSV/SVC, interrupt masking, and the DWT cycle counter. Other targets require
-their own hardware port; they do not fall back to the host backend.
+Without `host`, the supported ARM targets select `CortexMPlatform`, which is
+backed by SysTick, PendSV/SVC, interrupt masking, and the DWT cycle counter.
+The hardware port supports these Rust targets:
+
+- `thumbv7m-none-eabi` (Cortex-M3)
+- `thumbv7em-none-eabi` and `thumbv7em-none-eabihf` (Cortex-M4/M7)
+- `thumbv8m.main-none-eabi` and `thumbv8m.main-none-eabihf` (ARMv8-M Mainline)
+
+PendSV includes FP register save/restore instructions only for `eabihf`
+targets, and uses EXC_RETURN to check whether a thread has an active FP frame.
+Soft-float `eabi` builds use only the core-register context; applications must
+not enable FP use in those builds. ARMv6-M and ARMv8-M Baseline targets (such as
+Cortex-M0/M0+/M23), other ARM profiles, and custom target specifications require
+a separate port. `build.rs` rejects unsupported targets with an explicit error;
+they do not fall back to the host backend.
 
 ## Source layout
 

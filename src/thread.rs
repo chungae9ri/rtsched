@@ -11,7 +11,8 @@ use core::ptr;
 use core::ptr::NonNull;
 
 use crate::arch::platform::{
-    self, THREAD_INITIAL_FRAME_WORDS, THREAD_STACK_ALIGNMENT, request_context_switch,
+    self, THREAD_INITIAL_FRAME_WORDS, THREAD_STACK_ALIGNMENT, blocking_context_available,
+    request_context_switch,
 };
 use crate::clock::ticks_per_ms;
 use crate::critical_section;
@@ -1002,6 +1003,30 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
     })
 }
 
+// Caller must serialize scheduler access. Validate before inspecting timers or
+// changing any intrusive queue links, including in release builds.
+unsafe fn thread_for_suspend(can_switch: bool) -> Option<ThreadHandle> {
+    unsafe {
+        assert!(
+            !CURRENT_THREAD_CTX.is_null(),
+            "thread operation requires a current scheduler thread"
+        );
+        let thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
+        if (*thread.as_ptr()).is_idle() {
+            return None;
+        }
+        assert!(
+            (*thread.as_ptr()).state == ThreadState::Running,
+            "thread operation requires a running scheduler thread"
+        );
+        assert!(
+            can_switch,
+            "thread operation requires thread mode with context switching enabled"
+        );
+        Some(thread)
+    }
+}
+
 /// Cooperatively yield the CPU from the running RT thread to the
 /// next scheduled left-most timer in the KTimer rbtree.
 ///
@@ -1011,10 +1036,24 @@ pub fn current_rt_thread_runtime() -> Option<u32> {
 /// computes the next periodic release before resetting runtime to zero.
 /// Application code does not need to reset runtime at the start of a job.
 /// Sleeping or blocking within a job preserves its accumulated runtime.
+/// Calls by the idle thread do nothing.
+///
+/// # Panics
+///
+/// Panics before changing scheduler state if no thread is selected, or if a
+/// non-idle thread is not `Running` or cannot context-switch. On Cortex-M, call
+/// from thread mode with PRIMASK, BASEPRI, and FAULTMASK clear, outside any
+/// caller-owned critical section. The host backend cannot context-switch.
 pub fn yieldyi() {
+    yieldyi_with_context(blocking_context_available());
+}
+
+pub(crate) fn yieldyi_with_context(can_switch: bool) {
     critical_section(|| unsafe {
+        let Some(current_thread) = thread_for_suspend(can_switch) else {
+            return;
+        };
         let elapsed: u32 = elapsed_ticks_since_current_reload();
-        let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
         let current_ktimer = match (*current_thread.as_ptr()).kind {
             ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
             ThreadKind::Rt => rt_ktimer_entity(current_thread),
@@ -1029,10 +1068,25 @@ pub fn yieldyi() {
     });
 }
 
+/// Suspend the running thread for `msec` milliseconds.
+///
+/// Calls by the idle thread do nothing.
+///
+/// # Panics
+///
+/// Panics before changing scheduler state under the same invalid calling
+/// contexts as [`yieldyi`], including before scheduler startup, from an
+/// interrupt handler or caller-owned critical section, and on the host backend.
 pub fn msleepyi(msec: u32) {
+    msleepyi_with_context(msec, blocking_context_available());
+}
+
+pub(crate) fn msleepyi_with_context(msec: u32, can_switch: bool) {
     critical_section(|| unsafe {
+        let Some(current_thread) = thread_for_suspend(can_switch) else {
+            return;
+        };
         let elapsed = elapsed_ticks_since_current_reload();
-        let current_thread = ThreadHandle::from_thread_ctx(CURRENT_THREAD_CTX);
         let current_ktimer = match (*current_thread.as_ptr()).kind {
             ThreadKind::Cfs => ptr::addr_of_mut!(CFS_KTIMER.entity),
             ThreadKind::Rt => rt_ktimer_entity(current_thread),
