@@ -32,6 +32,13 @@ the timer is marked `inactive`.
 - `relative_deadline_ticks`: time from release to the job's scheduling deadline.
 - `budget_ticks`: runtime budget checked against `RtThread::runtime`.
 
+If an active RT timer expires and its thread's accounted runtime exceeds
+`relative_deadline_ticks`, the scheduler records the deadline miss, prints
+timer and thread diagnostics, and panics. The board's panic handler determines
+the final behavior. Budget overruns are reported and counted without panicking.
+Panicking on a detected deadline miss is a behavior change from v0.1.0; see
+[error handling](error_handling.md).
+
 `expire_at` is the next timer expiration value and is updated when a timer is re-armed/rescheduled:
 dispatch expiry in `SysTick` interrupt handler, `yieldyi`, wait timer programming in `msleepyi`.
 

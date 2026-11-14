@@ -6,6 +6,10 @@ This release adds synchronization and message queues, makes thread lifecycle
 states explicit, and separates the native test backend from the Cortex-M port.
 It contains breaking API changes from v0.1.0.
 
+The notes cover the full development history since `v0.1.0`, with related
+commits grouped by their resulting behavior. [Full comparison and commit
+history][0.2.0].
+
 ### Added
 
 - Allocation-free `BinarySemaphore`, `CountingSemaphore`, and `Mutex<T>` with
@@ -42,6 +46,11 @@ It contains breaking API changes from v0.1.0.
 - RT job completion calculates the next release and resets runtime in
   `yieldyi()`. `set_rt_thread_start_time` was removed; applications no longer
   reset runtime at job entry. Sleeping within a job preserves its runtime.
+- A detected RT deadline miss now emits diagnostics and panics instead of
+  logging and continuing. The check applies when an active RT timer expires
+  and the thread's accounted runtime exceeds its relative deadline. Budget
+  overruns remain nonfatal reports. RT miss accounting is now stored on
+  `RtKTimer::miss_cnt` rather than its embedded timer entity.
 - `RtKTimer::init_rt_thread`, raw RT timer accessors, and the public
   `dequeue_cfs_thread_to_waitq`, `dequeue_rt_thread_to_waitq`, and
   `enqueue_rt_thread_from_waitq` helpers were removed from the application API.
@@ -60,8 +69,13 @@ It contains breaking API changes from v0.1.0.
   calls panic in both debug and release builds; idle-thread calls remain no-ops.
 - PendSV saves/restores FP registers only for hard-float (`eabihf`) targets,
   allowing non-FPU Cortex-M builds to assemble successfully.
-- Blocking synchronization and message-queue calls reject interrupt-handler,
-  masked-interrupt, and other invalid waiting contexts without changing state.
+- Scheduler ticks are ignored until startup has installed the first thread's
+  context, so an early timer interrupt cannot dispatch through an unset
+  current-thread pointer.
+- When a wait is required, synchronization and message-queue calls reject
+  interrupt-handler, masked-interrupt, and other invalid waiting contexts
+  without changing state. Immediately available operations retain their
+  documented nonblocking behavior.
 - Timer accounting keeps a reload epoch so a cooperative yield cannot charge
   the same elapsed ticks twice. Message-queue retries retain their original
   absolute timeout, and timeout/cancellation removes both waiter memberships.
@@ -92,10 +106,13 @@ edition 2024.
 3. Update state matches, `SchedInfo` imports, `ThreadCtx::is_cfs` field reads,
    and `wait_info()` consumers to the types described above. Remove manual RT
    runtime resets and direct queue-transition calls.
-4. Call `yieldyi()` and `msleepyi()` only from running threads with context
+4. Review RT timing and the board's panic handler because detected deadline
+   misses now panic. See the [timer guide](docs/ktimer.md) for the distinction
+   between deadline misses and budget overruns.
+5. Call `yieldyi()` and `msleepyi()` only from running threads with context
    switching enabled. The [error-handling guide](docs/error_handling.md)
    documents the calling-context rules for all blocking APIs.
-5. For native tests, use an explicit host target and feature, for example:
+6. For native tests, use an explicit host target and feature, for example:
    `cargo test --features host --target x86_64-unknown-linux-gnu`.
 
 [0.2.0]: https://github.com/chungae9ri/rtsched/compare/v0.1.0...v0.2.0
