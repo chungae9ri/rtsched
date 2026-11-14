@@ -8,8 +8,9 @@
   wait-queue transitions, missing current RT runtime, and missing next timer reload.
 - Panic for public setup mistakes that would make scheduler state invalid, such as
   zero CFS priority, a null RT timer, null thread storage, null stack storage,
-  too-small stacks, or unaligned stack tops. The thread builders also provide
-  `try_spawn` variants that return `ThreadSpawnError` for these setup checks.
+  too-small stacks, or unaligned stack tops. The builders' `spawn` methods
+  validate these setup checks before writing thread storage; the former
+  `try_spawn` methods are no longer part of the API.
   The unit-returning `yieldyi` and `msleepyi` APIs also panic on invalid calls:
   no selected scheduler thread, a non-idle thread that is not `Running`, or
   context switching unavailable. These checks run before changing timers or

@@ -19,6 +19,7 @@ integrations.
 
 ## Documentation
 
+- [Release notes and migration from v0.1.0](CHANGELOG.md)
 - [Scheduling](docs/sched.md), [kernel timers](docs/ktimer.md), and
   [CFS run queues](docs/runq.md)
 - [Threads](docs/thread.md) and [wait queues](docs/waitq.md)
