@@ -10,6 +10,10 @@
   zero CFS priority, a null RT timer, null thread storage, null stack storage,
   too-small stacks, or unaligned stack tops. The thread builders also provide
   `try_spawn` variants that return `ThreadSpawnError` for these setup checks.
+  The unit-returning `yieldyi` and `msleepyi` APIs also panic on invalid calls:
+  no selected scheduler thread, a non-idle thread that is not `Running`, or
+  context switching unavailable. These checks run before changing timers or
+  queues and apply in release builds too. Calls by the idle thread do nothing.
 - Use `debug_assert!` for internal unsafe invariants that should already be guaranteed by
   safe wrappers or scheduler ownership rules, such as intrusive-tree duplicate insertion
   checks and raw pointer downcasts.
@@ -30,3 +34,8 @@ unavailable. Missing threads return `NoCurrentThread`, and recursive mutex locki
 still returns `WouldDeadlock`. Native host builds reject required waits because
 they cannot suspend scheduler threads through PendSV. Message queues use the
 [same blocking-context policy](message_queue.md).
+
+`yieldyi` and `msleepyi` require the same unmasked thread-mode context for
+non-idle threads. Native host builds reject them because they cannot suspend
+scheduler threads. Unlike the synchronization APIs, they panic on invalid
+contexts because their existing signatures do not return a `Result`.

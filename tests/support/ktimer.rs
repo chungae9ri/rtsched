@@ -751,7 +751,7 @@ pub fn yieldyi_resets_rt_runtime_after_scheduling_next_release() {
 
         assert_eq!(crate::current_rt_thread_runtime(), Some(15));
         // The host has no hardware timer, so the final elapsed interval is zero.
-        crate::yieldyi();
+        crate::thread::yieldyi_with_context(true);
         assert!(ptr::eq(next_ktimer(), &active_later));
         assert_eq!(crate::current_rt_thread_runtime(), Some(0));
         crate::test_support::clear_current_thread();
@@ -798,6 +798,44 @@ pub fn rt_yield_without_active_timers_returns_null() {
     assert_eq!(ktimer.entity.expire_at(), 60);
     unsafe {
         assert_eq!((*KTIMER_QUEUE.get()).now_ticks(), 15);
+    }
+}
+
+pub fn msleepyi_blocks_running_rt_thread_until_wake_deadline() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let mut rt = rt_thread("sleeper");
+    let mut ktimer = RtKTimer::new(60, ptr::null_mut(), "sleeper");
+    let previous_clock = crate::sys_clk_freq();
+
+    unsafe {
+        reset_wait_queue();
+        init_ktimer_queue();
+        crate::update_sys_clk_freq(1000);
+        ktimer.init_rt_ktimer(&mut rt.thread);
+        enqueue_ktimer(ktimer.entity_mut());
+        rt.thread.set_state(ThreadState::Running);
+        rt.runtime = 15;
+        crate::test_support::set_current_thread(&mut rt.thread, false);
+
+        crate::thread::msleepyi_with_context(5, true);
+
+        assert_eq!(rt.thread.state, ThreadState::Waiting);
+        assert_eq!(rt.wait_entity.wake_at, 5);
+        assert_eq!(rt.wait_entity.waitevt, None);
+        assert_eq!(rt.runtime, 15);
+        assert!(!ktimer.entity.is_linked());
+
+        advance_ktimers(5);
+        let next = dispatch_expired_ktimer(5);
+        assert_eq!(rt.thread.state, ThreadState::ReadyActive);
+        assert!(ktimer.entity.is_active());
+        assert!(ptr::eq(next, ktimer.entity_mut()));
+        assert!((*WAIT_QUEUE.get()).is_empty());
+
+        reset_wait_queue();
+        reset_global_ktimer_queue();
+        crate::test_support::clear_current_thread();
+        crate::update_sys_clk_freq(previous_clock);
     }
 }
 

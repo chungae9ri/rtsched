@@ -274,6 +274,14 @@ pub unsafe fn clear_current_thread() {
     }
 }
 
+pub fn yield_thread_for_test(can_switch: bool) {
+    crate::thread::yieldyi_with_context(can_switch);
+}
+
+pub fn sleep_thread_for_test(msec: u32, can_switch: bool) {
+    crate::thread::msleepyi_with_context(msec, can_switch);
+}
+
 pub unsafe fn attach_rt_ktimer(thread: &mut RtThread, ktimer: &mut RtKTimer) -> ThreadHandle {
     unsafe {
         let handle = ThreadHandle::from_thread_ctx(thread.thread_ctx_mut());

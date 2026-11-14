@@ -133,6 +133,11 @@ fn yieldyi_resets_rt_runtime_after_scheduling_next_release() {
 }
 
 #[test]
+fn msleepyi_blocks_running_rt_thread_until_wake_deadline() {
+    ktimer::msleepyi_blocks_running_rt_thread_until_wake_deadline();
+}
+
+#[test]
 fn rt_yield_without_active_timers_returns_null() {
     ktimer::rt_yield_without_active_timers_returns_null();
 }

@@ -56,8 +56,8 @@ mod imp {
     //   standard hardware frame consumed by EXC_RETURN: r0, r1, r2, r3, r12, lr,
     //   pc, xPSR. `ThreadCtx.sp` points at the saved r4..r11 block (the full saved
     //   context begins at this pointer when restoring).
-    // - Newly initialized threads start with a basic non-FP frame. After a running
-    //   thread has an active FP context, the hardware exception frame also carries
+    // - Newly initialized threads start with a basic non-FP frame. On hard-float
+    //   targets, once a thread has an active FP context, the hardware frame carries
     //   s0-s15/FPSCR, and PendSV adds a software-saved s16-s31 block immediately
     //   above the r4-r11 block. EXC_RETURN bit 4 clear selects that extended
     //   restore path.
@@ -91,6 +91,22 @@ mod imp {
         ".size SVCall, .-SVCall",
     );
 
+    // Hard-float Cortex-M targets require FP register preservation. Soft-float
+    // builds must not assemble FP instructions at all.
+    #[cfg(target_abi = "eabihf")]
+    macro_rules! fp_context {
+        ($instruction:literal) => {
+            concat!("tst lr, #0x10\nit eq\n", $instruction, " r0!, {{s16-s31}}")
+        };
+    }
+
+    #[cfg(not(target_abi = "eabihf"))]
+    macro_rules! fp_context {
+        ($instruction:literal) => {
+            ""
+        };
+    }
+
     macro_rules! pendsv_handler {
         ($($sched_isr_timing:literal,)*) => {
             // PendSV handler used for context switching between threads.
@@ -107,9 +123,7 @@ mod imp {
                 "ite eq",
                 "mrseq r0, msp", // Thread used MSP.
                 "mrsne r0, psp", // Thread used PSP.
-                "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
-                "it eq",
-                "vstmdbeq r0!, {{s16-s31}}", // Save callee-saved FP registers when present.
+                fp_context!("vstmdbeq"), // Save an active FP context on hard-float targets.
                 "stmdb r0!, {{r4-r11}}",     // Save callee-saved core registers on the thread stack.
                 "ldr r1, =CURRENT_THREAD_CTX", // R1 = &CURRENT_THREAD_CTX
                 "ldr r2, [r1]",              // R2 = CURRENT_THREAD_CTX thread pointer
@@ -121,9 +135,7 @@ mod imp {
                 "ldr r0, [r2]", // R0 = next thread's saved SP
                 "ldr lr, [r2, #4]", // LR = next thread's saved EXC_RETURN
                 "ldmia r0!, {{r4-r11}}", // Restore callee-saved core registers for the selected thread.
-                "tst lr, #0x10", // EXC_RETURN bit 4 clear means an FP context is active.
-                "it eq",
-                "vldmiaeq r0!, {{s16-s31}}", // Restore callee-saved FP registers when present.
+                fp_context!("vldmiaeq"), // Restore an active FP context on hard-float targets.
                 "tst lr, #4",                // Does the next thread return using MSP or PSP?
                 "ite eq",
                 "msreq msp, r0", // Restore MSP-backed context.
